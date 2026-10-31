@@ -126,7 +126,7 @@ export default function AppSidebar() {
           </div>
         )}
 
-        <nav className="flex-1 overflow-y-auto px-2.5 py-2">
+        <nav className="flex-1 overflow-y-auto px-2.5 py-2 sidebar-scroll">
           {sections.map((s) => (
             <div key={s.title} className="mb-2">
               <p className="mb-0.5 px-2 text-[9.5px] font-bold uppercase tracking-[0.16em] text-muted-foreground/70">{s.title}</p>

@@ -201,3 +201,12 @@
   background: oklch(0.74 0.11 80 / 50%);
 }
 
+
+
+/* Sidebar menu: slim scrollbar, and a soft fade at the bottom edge when more items are below. */
+.sidebar-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--primary) 35%, transparent) transparent;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent);
+}

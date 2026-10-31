@@ -1,0 +1,167 @@
+{
+  "entities": {
+    "Client": {
+      "title": "Client",
+      "description": "Travel agency client or passenger record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "headId": { "type": "string", "maxLength": 128 },
+        "firstName": { "type": "string", "maxLength": 128 },
+        "lastName": { "type": "string", "maxLength": 128 },
+        "gender": { "type": "string", "maxLength": 32 },
+        "nationality": { "type": "string", "maxLength": 128 },
+        "passport": { "type": "string", "maxLength": 64 },
+        "phone": { "type": "string", "maxLength": 64 },
+        "packageType": { "type": "string", "maxLength": 128 },
+        "paymentStatus": { "type": "string", "maxLength": 32 },
+        "amountDue": { "type": "number" },
+        "amountPaid": { "type": "number" },
+        "isVip": { "type": "boolean" }
+      },
+      "required": ["id", "headId", "firstName", "lastName", "amountDue", "amountPaid"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Travel booking file / dossier",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "headId": { "type": "string", "maxLength": 128 },
+        "agentId": { "type": "string", "maxLength": 128 },
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "totalAmount": { "type": "number" },
+        "amountReceived": { "type": "number" },
+        "totalCost": { "type": "number" },
+        "commission": { "type": "number" },
+        "status": { "type": "string", "maxLength": 32 },
+        "packageType": { "type": "string", "maxLength": 128 },
+        "travelDate": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "members": { "type": "number" }
+      },
+      "required": ["id", "headId", "totalAmount", "status", "packageType", "travelDate"]
+    },
+    "Agent": {
+      "title": "Agent",
+      "description": "Travel sub-agent / agency partner",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 128 },
+        "agency": { "type": "string", "maxLength": 128 },
+        "phone": { "type": "string", "maxLength": 64 },
+        "commissionRate": { "type": "number" }
+      },
+      "required": ["id", "name"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Service supplier (hotels, airlines, transport providers)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 128 },
+        "serviceType": { "type": "string", "maxLength": 128 },
+        "contact": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["id", "name"]
+    },
+    "LedgerEntry": {
+      "title": "LedgerEntry",
+      "description": "Financial ledger transactions (receipts, payments, purchases, expenses)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 64 },
+        "type": { "type": "string", "maxLength": 64 },
+        "headId": { "type": "string", "maxLength": 128 },
+        "referenceId": { "type": "string", "maxLength": 128 },
+        "referenceName": { "type": "string", "maxLength": 128 },
+        "amount": { "type": "number" },
+        "note": { "type": "string", "maxLength": 512 }
+      },
+      "required": ["id", "date", "type", "amount"]
+    },
+    "Account": {
+      "title": "Account",
+      "description": "Financial cash or bank account",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "maxLength": 64 },
+        "openingBalance": { "type": "number" },
+        "openingDate": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "type"]
+    },
+    "PurchaseGroup": {
+      "title": "PurchaseGroup",
+      "description": "Shared purchase group or PNR batch",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 128 },
+        "category": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "category"]
+    },
+    "SettingsDoc": {
+      "title": "SettingsDoc",
+      "description": "Application settings and state",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["id"]
+    },
+    "ConnectionTest": {
+      "title": "ConnectionTest",
+      "description": "Test connection ping document",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["status"]
+    }
+  },
+  "firestore": {
+    "/clients/{clientId}": {
+      "schema": "Client",
+      "description": "Client personal data and checklist items"
+    },
+    "/bookings/{bookingId}": {
+      "schema": "Booking",
+      "description": "Travel bookings"
+    },
+    "/agents/{agentId}": {
+      "schema": "Agent",
+      "description": "Travel agent records"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": "Supplier",
+      "description": "Service suppliers and providers"
+    },
+    "/entries/{entryId}": {
+      "schema": "LedgerEntry",
+      "description": "Accounting and ledger transactions"
+    },
+    "/accounts/{accountId}": {
+      "schema": "Account",
+      "description": "Chart of cash and bank accounts"
+    },
+    "/groups/{groupId}": {
+      "schema": "PurchaseGroup",
+      "description": "Shared PNR purchase batches"
+    },
+    "/settings/{settingId}": {
+      "schema": "SettingsDoc",
+      "description": "System settings and balances"
+    },
+    "/test/{testId}": {
+      "schema": "ConnectionTest",
+      "description": "Connection test doc"
+    }
+  }
+}

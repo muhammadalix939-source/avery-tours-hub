@@ -1,0 +1,183 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Default-deny catch-all safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    // Explicit Admin verification: User email from runtime or admin document in /admins/{uid}
+    function isAdmin() {
+      return isSignedIn() && isVerified() && (
+        request.auth.token.email == 'alianus09x@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Financial balance protection: Non-admins can NEVER change customer balances, supplier balances, or booking totals
+    function isCustomerBalanceUnchanged() {
+      return incoming().amountDue == existing().amountDue &&
+             incoming().amountPaid == existing().amountPaid;
+    }
+
+    function isBookingTotalUnchanged() {
+      return incoming().totalAmount == existing().totalAmount &&
+             (!('totalCost' in existing()) || incoming().totalCost == existing().totalCost) &&
+             (!('amountReceived' in existing()) || incoming().amountReceived == existing().amountReceived);
+    }
+
+    function isSupplierBalanceUnchanged() {
+      return (!('totalPayable' in existing()) || incoming().totalPayable == existing().totalPayable) &&
+             (!('totalPaid' in existing()) || incoming().totalPaid == existing().totalPaid);
+    }
+
+    // Entity validation helpers
+    function isValidClient(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.headId is string && data.headId.size() <= 128 &&
+             data.firstName is string && data.firstName.size() <= 128 &&
+             data.lastName is string && data.lastName.size() <= 128 &&
+             data.amountDue is number && data.amountDue >= 0 &&
+             data.amountPaid is number && data.amountPaid >= 0;
+    }
+
+    function isValidBooking(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.headId is string && data.headId.size() <= 128 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.status is string && data.status.size() <= 64;
+    }
+
+    function isValidAgent(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 128;
+    }
+
+    function isValidSupplier(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 128;
+    }
+
+    function isValidLedgerEntry(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.date is string && data.date.size() <= 64 &&
+             data.type is string && data.type.size() <= 64 &&
+             data.amount is number && data.amount >= 0;
+    }
+
+    function isValidAccount(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 128 &&
+             data.type is string && data.type.size() <= 64;
+    }
+
+    function isValidGroup(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 128 &&
+             data.category is string && data.category.size() <= 64;
+    }
+
+    function isValidSettingsDoc(data) {
+      return data.id is string && data.id.size() <= 128;
+    }
+
+    // Connection test document
+    match /test/{testId} {
+      allow read: if isValidId(testId);
+      allow write: if isValidId(testId) && isVerified();
+    }
+
+    // Operational collections with strict Zero-Trust & Financial Authorization
+    // 1. Clients: Only Admin can create or delete. Balance fields (amountDue, amountPaid) require Admin authorization.
+    match /clients/{clientId} {
+      allow read: if isValidId(clientId) && isVerified();
+      allow create: if isValidId(clientId) && isAdmin() && isValidClient(incoming());
+      allow update: if isValidId(clientId) && isValidClient(incoming()) && (
+        isAdmin() || (isVerified() && isCustomerBalanceUnchanged())
+      );
+      allow delete: if isValidId(clientId) && isAdmin();
+    }
+
+    // 2. Bookings: Only Admin can create or delete. Total and cost fields (totalAmount, totalCost, amountReceived) require Admin authorization.
+    match /bookings/{bookingId} {
+      allow read: if isValidId(bookingId) && isVerified();
+      allow create: if isValidId(bookingId) && isAdmin() && isValidBooking(incoming());
+      allow update: if isValidId(bookingId) && isValidBooking(incoming()) && (
+        isAdmin() || (isVerified() && isBookingTotalUnchanged())
+      );
+      allow delete: if isValidId(bookingId) && isAdmin();
+    }
+
+    // 3. Suppliers: Only Admin can create or delete. Supplier payable/paid balances require Admin authorization.
+    match /suppliers/{supplierId} {
+      allow read: if isValidId(supplierId) && isVerified();
+      allow create: if isValidId(supplierId) && isAdmin() && isValidSupplier(incoming());
+      allow update: if isValidId(supplierId) && isValidSupplier(incoming()) && (
+        isAdmin() || (isVerified() && isSupplierBalanceUnchanged())
+      );
+      allow delete: if isValidId(supplierId) && isAdmin();
+    }
+
+    // 4. Financial Ledger Entries: Only Admin can write transactions
+    match /entries/{entryId} {
+      allow read: if isValidId(entryId) && isVerified();
+      allow create, update: if isValidId(entryId) && isAdmin() && isValidLedgerEntry(incoming());
+      allow delete: if isValidId(entryId) && isAdmin();
+    }
+
+    // 5. Chart of Accounts: Only Admin can manage accounts and initial balances
+    match /accounts/{accountId} {
+      allow read: if isValidId(accountId) && isVerified();
+      allow create, update: if isValidId(accountId) && isAdmin() && isValidAccount(incoming());
+      allow delete: if isValidId(accountId) && isAdmin();
+    }
+
+    // 6. Agents: Only Admin can create/update agents
+    match /agents/{agentId} {
+      allow read: if isValidId(agentId) && isVerified();
+      allow create, update: if isValidId(agentId) && isAdmin() && isValidAgent(incoming());
+      allow delete: if isValidId(agentId) && isAdmin();
+    }
+
+    // 7. Groups: Only Admin can manage batch groups
+    match /groups/{groupId} {
+      allow read: if isValidId(groupId) && isVerified();
+      allow create, update: if isValidId(groupId) && isAdmin() && isValidGroup(incoming());
+      allow delete: if isValidId(groupId) && isAdmin();
+    }
+
+    // 8. Settings: Only Admin can configure system settings
+    match /settings/{settingId} {
+      allow read: if isValidId(settingId) && isVerified();
+      allow create, update: if isValidId(settingId) && isAdmin() && isValidSettingsDoc(incoming());
+      allow delete: if isValidId(settingId) && isAdmin();
+    }
+
+    // 9. Admins: Only bootstrapped Admin can manage Admin RBAC roles
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+  }
+}

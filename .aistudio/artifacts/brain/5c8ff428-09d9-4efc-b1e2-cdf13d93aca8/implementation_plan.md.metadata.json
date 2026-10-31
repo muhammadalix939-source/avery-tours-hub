@@ -1,0 +1,6 @@
+{
+  "summary":  "Architectural blueprint for separating Active vs Completed bookings with hybrid fulfillment, full editing capabilities, and a universal Sort-By engine across Bookings, Entries, and Groups.",
+  "updatedAt":  "2026-10-27T18:24:04.483633842Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

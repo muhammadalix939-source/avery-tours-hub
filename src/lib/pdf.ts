@@ -32,6 +32,93 @@ const WHITE: [number, number, number]  = [255, 255, 255];
 const SUCCESS: [number, number, number]= [22, 110, 60];
 const DANGER: [number, number, number] = [170, 35, 35];
 
+// ---------- Brand Fonts Loader (Libre Baskerville + IBM Plex Sans) ----------
+interface FontCacheItem {
+  b64: string;
+  name: string;
+  style: string;
+}
+let fontCache: Record<string, FontCacheItem> | null = null;
+let fontLoadPromise: Promise<void> | null = null;
+
+export async function loadPdfFonts(doc: jsPDF): Promise<void> {
+  if (typeof window === "undefined") return;
+  if (!fontCache) {
+    if (!fontLoadPromise) {
+      fontLoadPromise = (async () => {
+        try {
+          const files = [
+            { file: "LibreBaskerville-Regular.ttf", name: "LibreBaskerville", style: "normal", url: "/fonts/LibreBaskerville-Regular.ttf" },
+            { file: "LibreBaskerville-Bold.ttf", name: "LibreBaskerville", style: "bold", url: "/fonts/LibreBaskerville-Bold.ttf" },
+            { file: "IBMPlexSans-Regular.ttf", name: "IBMPlexSans", style: "normal", url: "/fonts/IBMPlexSans-Regular.ttf" },
+            { file: "IBMPlexSans-Bold.ttf", name: "IBMPlexSans", style: "bold", url: "/fonts/IBMPlexSans-Bold.ttf" },
+          ];
+          const results = await Promise.all(
+            files.map(async (f) => {
+              const res = await fetch(f.url);
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const buf = await res.arrayBuffer();
+              const bytes = new Uint8Array(buf);
+              let binary = "";
+              const chunkSize = 0x8000;
+              for (let i = 0; i < bytes.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+              }
+              return { file: f.file, b64: btoa(binary), name: f.name, style: f.style };
+            })
+          );
+          fontCache = {};
+          for (const r of results) {
+            fontCache[r.file] = { b64: r.b64, name: r.name, style: r.style };
+          }
+        } catch (e) {
+          console.warn("Could not load custom brand fonts for PDF, using system fallbacks:", e);
+        }
+      })();
+    }
+    await fontLoadPromise;
+  }
+
+  if (fontCache) {
+    for (const [file, info] of Object.entries(fontCache)) {
+      try {
+        doc.addFileToVFS(file, info.b64);
+        doc.addFont(file, info.name, info.style);
+      } catch {}
+    }
+  }
+}
+
+if (typeof window !== "undefined") {
+  const dummy = new jsPDF();
+  loadPdfFonts(dummy).catch(() => {});
+}
+
+function hasFont(doc: jsPDF, name: string): boolean {
+  try {
+    const list = doc.getFontList() as Record<string, any>;
+    return Boolean(list && list[name]);
+  } catch {
+    return false;
+  }
+}
+
+function setSerif(doc: jsPDF, style: "normal" | "bold" | "italic" = "bold") {
+  if (hasFont(doc, "LibreBaskerville")) {
+    doc.setFont("LibreBaskerville", style === "italic" ? "normal" : style);
+  } else {
+    doc.setFont("times", style);
+  }
+}
+
+function setSans(doc: jsPDF, style: "normal" | "bold" | "italic" = "normal") {
+  if (hasFont(doc, "IBMPlexSans")) {
+    doc.setFont("IBMPlexSans", style === "italic" ? "normal" : style);
+  } else {
+    doc.setFont("helvetica", style);
+  }
+}
+
 // ---------- Page chrome ----------
 // ---------- Pagination safety ----------
 const PAGE_TOP = 24;      // content start on continuation pages
@@ -57,11 +144,11 @@ function pageFrame(doc: jsPDF) {
   doc.rect(10, 10, 190, 8, "F");
   doc.setFillColor(...GOLD);
   doc.rect(10, 18, 190, 0.5, "F");
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(8);
   doc.setTextColor(...GOLD_LT);
   doc.text(COMPANY, 14, 15.4);
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(7);
   doc.text("Statement (continued)", 196, 15.4, { align: "right" });
   doc.setTextColor(...INK);
@@ -104,11 +191,11 @@ function header(doc: jsPDF, title: string) {
 
   // Wordmark
   doc.setTextColor(...GOLD_LT);
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(14);
   doc.text(COMPANY, 38, 21.5);
 
-  doc.setFont("times", "italic");
+  setSerif(doc, "italic");
   doc.setFontSize(7.5);
   doc.setTextColor(...WHITE);
   doc.text(SLOGAN, 38, 27.5);
@@ -117,11 +204,11 @@ function header(doc: jsPDF, title: string) {
   doc.text(TAGLINE, 38, 32);
 
   // Document title (right)
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(10);
   doc.setTextColor(...WHITE);
   doc.text(title.toUpperCase(), 196, 22, { align: "right" });
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(7.5);
   doc.setTextColor(...GOLD_LT);
   const now = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
@@ -141,21 +228,21 @@ function footer(doc: jsPDF) {
     doc.setLineWidth(0.15);
     doc.line(14, 274.4, 196, 274.4);
 
-    doc.setFont("times", "bold");
+    setSerif(doc, "bold");
     doc.setFontSize(8);
     doc.setTextColor(...NAVY);
     doc.text(COMPANY, 14, 279);
-    doc.setFont("helvetica", "normal");
+    setSans(doc, "normal");
     doc.setFontSize(7);
     doc.setTextColor(...MUTED);
     doc.text(COMPANY_ADDR, 14, 283);
     doc.text(`${COMPANY_PHONE}   ·   ${COMPANY_EMAIL}`, 14, 287);
 
-    doc.setFont("times", "italic");
+    setSerif(doc, "italic");
     doc.setTextColor(...GOLD);
     doc.setFontSize(7.5);
     doc.text("Your journey begins with trust.", 196, 283, { align: "right" });
-    doc.setFont("helvetica", "normal");
+    setSans(doc, "normal");
     doc.setTextColor(...MUTED);
     doc.setFontSize(7);
     doc.text(`Page ${i} of ${pages}`, 196, 287, { align: "right" });
@@ -165,7 +252,7 @@ function footer(doc: jsPDF) {
 // ---------- Section helpers ----------
 function sectionTitle(doc: jsPDF, text: string, y: number) {
   if (y > PAGE_BOTTOM - 30) { doc.addPage(); pageFrame(doc); y = PAGE_TOP + 4; }
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(11);
   doc.setTextColor(...NAVY);
   doc.text(text.toUpperCase(), 14, y);
@@ -186,16 +273,17 @@ function brandTable(doc: jsPDF, opts: Parameters<typeof autoTable>[1]) {
   const o: any = opts || {};
   // Never start a table in the last few mm of a page — prevents heading/table splits
   if (typeof o.startY === "number" && o.startY > PAGE_BOTTOM - 20) o.startY = ensureSpace(doc, o.startY, 40);
+  const sansFont = hasFont(doc, "IBMPlexSans") ? "IBMPlexSans" : "helvetica";
   autoTable(doc, {
     showHead: "everyPage",
     showFoot: "lastPage",
     rowPageBreak: "avoid",
     willDrawPage: () => pageFrame(doc),
     theme: "grid",
-    headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8.5, fontStyle: "bold", halign: "left", cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
-    bodyStyles: { fontSize: 8.5, textColor: INK, cellPadding: 2.5, font: "helvetica", overflow: "linebreak", valign: "top" },
+    headStyles: { fillColor: NAVY, textColor: WHITE, fontSize: 8.5, fontStyle: "bold", font: sansFont, halign: "left", cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
+    bodyStyles: { fontSize: 8.5, textColor: INK, cellPadding: 2.5, font: sansFont, overflow: "linebreak", valign: "top" },
     alternateRowStyles: { fillColor: ROW_ALT },
-    styles: { lineColor: GOLD_LT, lineWidth: 0.15, overflow: "linebreak", cellWidth: "auto" },
+    styles: { lineColor: GOLD_LT, lineWidth: 0.15, overflow: "linebreak", cellWidth: "auto", font: sansFont },
     tableWidth: "auto",
     ...o,
     margin: { left: 14, right: 14, top: PAGE_TOP, bottom: 297 - PAGE_BOTTOM },
@@ -212,18 +300,18 @@ function partyBlock(doc: jsPDF, x: number, y: number, w: number, label: string, 
   doc.setFillColor(...GOLD);
   doc.rect(x, y, 1.2, 6 + lines.length * 5 + 4, "F");
 
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(8);
   doc.setTextColor(...GOLD);
   doc.text(label.toUpperCase(), x + 4, y + 4.5);
 
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(8);
   doc.setTextColor(...INK);
   lines.forEach(([k, v], i) => {
-    doc.setFont("helvetica", "bold");
+    setSans(doc, "bold");
     doc.text(`${k}:`, x + 4, y + 10 + i * 5);
-    doc.setFont("helvetica", "normal");
+    setSans(doc, "normal");
     doc.text(String(v || "—"), x + 28, y + 10 + i * 5);
   });
   return y + 6 + lines.length * 5 + 6;
@@ -247,7 +335,7 @@ function totalsBand(doc: jsPDF, y: number, label: string, value: string, tone: "
   else doc.setFillColor(...NAVY);
   doc.rect(14, y, 182, 11, "F");
   doc.setTextColor(...WHITE);
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(11);
   doc.text(label.toUpperCase(), 18, y + 7.4);
   doc.text(value, 192, y + 7.4, { align: "right" });
@@ -273,12 +361,12 @@ function summaryCards(doc: jsPDF, y: number, cards: Array<[string, string, "ink"
     doc.setLineWidth(0.2);
     doc.rect(x, y, cardW, 19);
 
-    doc.setFont("helvetica", "bold");
+    setSans(doc, "bold");
     doc.setFontSize(7);
     doc.setTextColor(...WHITE);
     doc.text(label.toUpperCase(), x + 3, y + 3.5);
 
-    doc.setFont("times", "bold");
+    setSerif(doc, "bold");
     doc.setFontSize(11);
     if (tone === "success") doc.setTextColor(...SUCCESS);
     else if (tone === "danger") doc.setTextColor(...DANGER);
@@ -417,8 +505,12 @@ function renderServiceSections(doc: jsPDF, y: number, bookings: Booking[]): numb
 // =========================================================================
 //  SUPPLIER LEDGER / STATEMENT
 // =========================================================================
-export function generateSupplierLedger(supplier: Supplier, entries: LedgerEntry[], opts: StatementOptions = {}) {
+// =========================================================================
+//  SUPPLIER LEDGER / STATEMENT
+// =========================================================================
+export async function generateSupplierLedger(supplier: Supplier, entries: LedgerEntry[], opts: StatementOptions = {}) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   supplierHeader(doc);
 
   const filtered = entries
@@ -528,8 +620,8 @@ export function generateSupplierLedger(supplier: Supplier, entries: LedgerEntry[
   save(doc, `Avery_Supplier_Statement_${supplier.id}.pdf`);
 }
 
-// ---- Supplier statement — premium helpers ----
-function supplierHeader(doc: jsPDF) {
+// ---- High-End Luxury Executive Statement Chrome ----
+function executiveHeader(doc: jsPDF, supertitle: string, subtitle: string) {
   markFramed(doc);
   // Ivory base
   doc.setFillColor(...IVORY);
@@ -557,37 +649,41 @@ function supplierHeader(doc: jsPDF) {
   } catch {}
 
   // Wordmark
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(18);
   doc.setTextColor(...GOLD_LT);
   doc.text("AVERY", 42, 23);
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(9.5);
   doc.setTextColor(...WHITE);
   doc.text("INTERNATIONAL TRAVEL & TOURS", 42, 29);
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(7);
   doc.setTextColor(...GOLD_LT);
   doc.text("Umrah · Hajj · Ziyarah · International & Domestic Tours · Visas · Transport", 42, 35.5);
-  doc.setFont("times", "italic");
+  setSerif(doc, "italic");
   doc.setFontSize(7);
   doc.setTextColor(...WHITE);
   doc.text("Curated journeys. Trusted service. Worldwide reach.", 42, 41);
 
   // Right side: document title, big serif
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(22);
   doc.setTextColor(...WHITE);
-  doc.text("SUPPLIER", 196, 24, { align: "right" });
+  doc.text(supertitle.toUpperCase(), 196, 24, { align: "right" });
   doc.setTextColor(...GOLD_LT);
-  doc.text("STATEMENT", 196, 33, { align: "right" });
-  doc.setFont("helvetica", "normal");
+  doc.text(subtitle.toUpperCase(), 196, 33, { align: "right" });
+  setSans(doc, "normal");
   doc.setFontSize(7.5);
   doc.setTextColor(...WHITE);
   const now = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
   doc.text(`Issued ${now}`, 196, 40, { align: "right" });
 
   doc.setTextColor(...INK);
+}
+
+function supplierHeader(doc: jsPDF) {
+  executiveHeader(doc, "SUPPLIER", "STATEMENT");
 }
 
 function supplierMetaBar(doc: jsPDF, y: number, meta: { stmtNo: string; period: string; groupLabel?: string }): number {
@@ -600,28 +696,28 @@ function supplierMetaBar(doc: jsPDF, y: number, meta: { stmtNo: string; period: 
   doc.setFillColor(...GOLD);
   doc.rect(14, y, 1.4, h, "F");
 
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(7);
   doc.setTextColor(...GOLD);
   doc.text("STATEMENT NO.", 19, y + 4);
   doc.text("PERIOD", 92, y + 4);
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(9);
   doc.setTextColor(...NAVY);
   doc.text(meta.stmtNo, 19, y + 8);
   doc.text(meta.period, 92, y + 8);
 
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(7);
   doc.setTextColor(...GOLD);
   doc.text("CURRENCY", 168, y + 4);
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(9);
   doc.setTextColor(...NAVY);
   doc.text("PKR", 168, y + 8);
 
   if (meta.groupLabel) {
-    doc.setFont("helvetica", "italic");
+    setSans(doc, "italic");
     doc.setFontSize(7.5);
     doc.setTextColor(...GOLD);
     doc.text(`Filtered by Group  ·  ${meta.groupLabel}`, 19, y + 11.5);
@@ -644,17 +740,17 @@ function supplierIdentityCard(doc: jsPDF, y: number, s: Supplier): number {
   doc.setFillColor(...GOLD);
   doc.rect(14, y, 1.2, h, "F");
 
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(6.8);
   doc.setTextColor(...GOLD_LT);
   doc.text("STATEMENT ISSUED TO", 20, y + 5.5);
 
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(13);
   doc.setTextColor(...WHITE);
   doc.text(s.companyName || "—", 20, y + 12.5);
 
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(7.5);
   doc.setTextColor(...GOLD_LT);
   doc.text(s.id, 20, y + 17.5);
@@ -664,8 +760,8 @@ function supplierIdentityCard(doc: jsPDF, y: number, s: Supplier): number {
   // Right details grid
   const col1 = 82;
   const col2 = 140;
-  const labelStyle = () => { doc.setFont("helvetica", "bold"); doc.setFontSize(6.8); doc.setTextColor(...GOLD); };
-  const valStyle = () => { doc.setFont("helvetica", "normal"); doc.setFontSize(8.5); doc.setTextColor(...INK); };
+  const labelStyle = () => { setSans(doc, "bold"); doc.setFontSize(6.8); doc.setTextColor(...GOLD); };
+  const valStyle = () => { setSans(doc, "normal"); doc.setFontSize(8.5); doc.setTextColor(...INK); };
 
   labelStyle(); doc.text("CONTACT PERSON", col1, y + 5.5);
   valStyle(); doc.text(s.contactPerson || "—", col1, y + 10);
@@ -685,12 +781,66 @@ function supplierIdentityCard(doc: jsPDF, y: number, s: Supplier): number {
   return y + h + 5;
 }
 
+function clientIdentityCard(doc: jsPDF, y: number, c: Client): number {
+  const h = 26;
+  // Card
+  doc.setFillColor(...WHITE);
+  doc.setDrawColor(...GOLD_LT);
+  doc.setLineWidth(0.2);
+  doc.rect(14, y, 182, h, "FD");
+
+  // Left navy plate
+  doc.setFillColor(...NAVY);
+  doc.rect(14, y, 62, h, "F");
+  doc.setFillColor(...GOLD);
+  doc.rect(14, y, 1.2, h, "F");
+
+  setSans(doc, "bold");
+  doc.setFontSize(6.8);
+  doc.setTextColor(...GOLD_LT);
+  doc.text("STATEMENT ISSUED TO", 20, y + 5.5);
+
+  setSerif(doc, "bold");
+  doc.setFontSize(13);
+  doc.setTextColor(...WHITE);
+  doc.text(getClientName(c) || "—", 20, y + 12.5);
+
+  setSans(doc, "normal");
+  doc.setFontSize(7.5);
+  doc.setTextColor(...GOLD_LT);
+  doc.text(`Client ID: ${c.id}`, 20, y + 17.5);
+  doc.setTextColor(...WHITE);
+  doc.text(`Head ID: ${c.headId}`, 20, y + 22);
+
+  // Right details grid
+  const col1 = 82;
+  const col2 = 140;
+  const labelStyle = () => { setSans(doc, "bold"); doc.setFontSize(6.8); doc.setTextColor(...GOLD); };
+  const valStyle = () => { setSans(doc, "normal"); doc.setFontSize(8.5); doc.setTextColor(...INK); };
+
+  labelStyle(); doc.text("PACKAGE TYPE", col1, y + 5.5);
+  valStyle(); doc.text(c.packageType || "Custom Package", col1, y + 10);
+
+  labelStyle(); doc.text("PHONE NUMBER", col1, y + 15);
+  valStyle(); doc.text(c.phone || "—", col1, y + 19.5);
+
+  labelStyle(); doc.text("PASSPORT NUMBER", col2, y + 5.5);
+  valStyle(); doc.text(c.passport || "—", col2, y + 10);
+
+  labelStyle(); doc.text("PAYMENT STATUS", col2, y + 15);
+  valStyle();
+  doc.text(c.paymentStatus || "Active", col2, y + 19.5);
+
+  doc.setTextColor(...INK);
+  return y + h + 5;
+}
+
 function executiveSnapshot(
   doc: jsPDF, y: number,
   data: { payable: number; paid: number; remaining: number; bf?: number; purchases: number; payments: number; pctPaid: number }
 ): number {
   // Section title
-  doc.setFont("times", "italic");
+  setSerif(doc, "italic");
   doc.setFontSize(9);
   doc.setTextColor(...GOLD);
   doc.text("Executive Snapshot", 14, y);
@@ -726,12 +876,12 @@ function executiveSnapshot(
     doc.setLineWidth(0.6);
     doc.line(x, y, x + w, y);
 
-    doc.setFont("helvetica", "bold");
+    setSans(doc, "bold");
     doc.setFontSize(6.8);
     doc.setTextColor(...MUTED);
     doc.text(t.label.toUpperCase(), x + 3.5, y + 5.5);
 
-    doc.setFont("times", "bold");
+    setSerif(doc, "bold");
     doc.setFontSize(t.value.length > 14 ? 10 : 12);
     if (t.tone === "navy") doc.setTextColor(...NAVY);
     else if (t.tone === "success") doc.setTextColor(...SUCCESS);
@@ -742,11 +892,11 @@ function executiveSnapshot(
   y += h + 4;
 
   // Settlement progress bar
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(7);
   doc.setTextColor(...NAVY);
   doc.text("SETTLEMENT PROGRESS", 14, y);
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setTextColor(...MUTED);
   doc.text(`${data.pctPaid.toFixed(1)}% of payable settled`, 196, y, { align: "right" });
 
@@ -779,7 +929,7 @@ function categoryHeading(doc: jsPDF, y: number, label: string, count: number, to
   doc.setLineWidth(0.15);
   doc.line(14, y + h, 196, y + h);
 
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(11);
   doc.setTextColor(...NAVY);
   doc.text(label, 19, y + 6);
@@ -788,7 +938,7 @@ function categoryHeading(doc: jsPDF, y: number, label: string, count: number, to
 
   // count pill (in pill font)
   const pillTxt = `${count} ${count === 1 ? "item" : "items"}`;
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(7);
   const pillW = doc.getTextWidth(pillTxt) + 5;
   const pillX = 19 + labelW + 4;
@@ -798,11 +948,11 @@ function categoryHeading(doc: jsPDF, y: number, label: string, count: number, to
   doc.text(pillTxt, pillX + pillW / 2, y + 5.3, { align: "center" });
 
   // right total
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(7);
   doc.setTextColor(...MUTED);
   doc.text("SECTION TOTAL", 165, y + 3.6, { align: "right" });
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(10);
   if (tone === "success") doc.setTextColor(...SUCCESS);
   else doc.setTextColor(...NAVY);
@@ -817,7 +967,7 @@ function reconciliationBlock(
   d: { openingPayable?: number; openingPaid?: number; totalPurchases: number; totalPaid: number; grandPayable: number; grandPaid: number }
 ): number {
   y = ensureSpace(doc, y, 40);
-  doc.setFont("times", "italic");
+  setSerif(doc, "italic");
   doc.setFontSize(9);
   doc.setTextColor(...GOLD);
   doc.text("Ledger Reconciliation", 14, y);
@@ -864,7 +1014,7 @@ function drawReconCard(
   // header strip
   doc.setFillColor(...accent);
   doc.rect(x, y, w, 6, "F");
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(7.2);
   doc.setTextColor(...WHITE);
   doc.text(title.toUpperCase(), x + 3, y + 4.2);
@@ -876,11 +1026,12 @@ function drawReconCard(
       doc.setFillColor(...IVORY);
       doc.rect(x + 0.4, ry - 4, w - 0.8, 6, "F");
     }
-    doc.setFont(bold ? "times" : "helvetica", bold ? "bold" : "normal");
+    if (bold) setSerif(doc, "bold");
+    else setSans(doc, "normal");
     doc.setFontSize(bold ? 9 : 8);
     doc.setTextColor(...(bold ? NAVY : INK));
     doc.text(label, x + 3, ry);
-    doc.setFont("times", "bold");
+    setSerif(doc, "bold");
     doc.setFontSize(bold ? 9.5 : 8.5);
     doc.setTextColor(...(bold ? accent : INK));
     doc.text(formatCurrency(val), x + w - 3, ry, { align: "right" });
@@ -888,7 +1039,7 @@ function drawReconCard(
   doc.setTextColor(...INK);
 }
 
-function closingHero(doc: jsPDF, y: number, remaining: number) {
+function closingHero(doc: jsPDF, y: number, remaining: number, opts?: { title?: string; subtitle?: string; positiveLabel?: string; negativeLabel?: string }) {
   // If not enough room, add a page
   y = ensureSpace(doc, y, 32);
   const h = 30;
@@ -905,27 +1056,32 @@ function closingHero(doc: jsPDF, y: number, remaining: number) {
   doc.setFillColor(...GOLD);
   doc.rect(14, y, 2, h, "F");
 
-  doc.setFont("helvetica", "bold");
+  setSans(doc, "bold");
   doc.setFontSize(7.5);
   doc.setTextColor(...GOLD_LT);
-  doc.text("CLOSING BALANCE", 22, y + 9);
-  doc.setFont("times", "italic");
+  doc.text(opts?.title || "CLOSING BALANCE", 22, y + 9);
+  setSerif(doc, "italic");
   doc.setFontSize(8);
   doc.setTextColor(...WHITE);
-  doc.text("Net amount payable to supplier as of statement date.", 22, y + 15);
+  doc.text(opts?.subtitle || "Net amount payable to supplier as of statement date.", 22, y + 15);
 
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(20);
   const tone: [number, number, number] = remaining > 0 ? GOLD_LT : [180, 220, 190];
   doc.setTextColor(...tone);
   doc.text(formatCurrency(remaining), 192, y + 15, { align: "right" });
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(7);
   doc.setTextColor(...GOLD_LT);
-  doc.text(remaining > 0 ? "Outstanding — Payment Due" : remaining < 0 ? "Overpayment / Advance" : "Fully Settled", 192, y + 22, { align: "right" });
+  const statusTxt = remaining > 0
+    ? (opts?.positiveLabel || "Outstanding — Payment Due")
+    : remaining < 0
+    ? (opts?.negativeLabel || "Overpayment / Advance Credit")
+    : "Fully Settled";
+  doc.text(statusTxt, 192, y + 22, { align: "right" });
 
   // Auth line
-  doc.setFont("times", "italic");
+  setSerif(doc, "italic");
   doc.setFontSize(7);
   doc.setTextColor(...GOLD_LT);
   doc.text("Computer-generated statement · Avery Group of Travel · This document does not require a signature.", 105, y + 27, { align: "center" });
@@ -1070,8 +1226,9 @@ export interface AgentStatementOptions extends StatementOptions {
  *  Opening balance = everything dated before the From date (+ legacy B/F); closing = opening + period − received.
  * `entries` should be the FULL ledger; the function picks the agent's rows itself.
  */
-export function generateAgentReport(agent: Agent, entries: LedgerEntry[], opts: AgentStatementOptions = {}) {
+export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], opts: AgentStatementOptions = {}) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   header(doc, "Agent Account Statement");
   const scope: AgentStatementScope = opts.scope || "both";
   const incClient = scope !== "other";
@@ -1135,7 +1292,7 @@ export function generateAgentReport(agent: Agent, entries: LedgerEntry[], opts: 
 
   doc.setFillColor(...NAVY);
   doc.rect(14, y, 182, 7, "F");
-  doc.setFont("times", "bold"); doc.setFontSize(8.5); doc.setTextColor(...WHITE);
+  setSerif(doc, "bold"); doc.setFontSize(8.5); doc.setTextColor(...WHITE);
   doc.text(`Period: ${periodLabel}`, 18, y + 4.9);
   doc.text(`Statement: ${scopeLabel}`, 192, y + 4.9, { align: "right" });
   doc.setTextColor(...INK);
@@ -1277,61 +1434,90 @@ export function generateAgentReport(agent: Agent, entries: LedgerEntry[], opts: 
 // =========================================================================
 //  CLIENT STATEMENT
 // =========================================================================
-export function generateClientStatement(client: Client, entries: LedgerEntry[], opts: StatementOptions = {}) {
+export async function generateClientStatement(client: Client, entries: LedgerEntry[], opts: StatementOptions = {}) {
   const doc = new jsPDF();
-  header(doc, "Client Statement");
+  await loadPdfFonts(doc);
+  executiveHeader(doc, "CLIENT", "STATEMENT");
 
   const filtered = entries.filter((e) => inRange(e.date, opts.fromDate, opts.toDate));
   const periodLabel = opts.fromDate || opts.toDate
     ? `${fmtDate(opts.fromDate)} — ${fmtDate(opts.toDate)}`
     : "All-time";
 
-  let y = 44;
-  y = fromAndTo(doc, y, "Client", [
-    ["ID", client.id],
-    ["Name", getClientName(client)],
-    ["Head ID", client.headId],
-    ["Passport", client.passport || "—"],
-  ]);
-
-  doc.setFillColor(...NAVY);
-  doc.rect(14, y, 182, 7, "F");
-  doc.setFont("times", "bold");
-  doc.setFontSize(9);
-  doc.setTextColor(...WHITE);
-  doc.text(`Statement Period: ${periodLabel}`, 18, y + 5);
-  doc.text(`Package: ${client.packageType}   ·   Phone: ${client.phone}`, 192, y + 5, { align: "right" });
-  doc.setTextColor(...INK);
-  y += 11;
-
-  const openingPaid = client.openingPaid || 0;
+  const includeOpening = opts.includeOpening !== false;
+  const openingPaid = includeOpening ? (client.openingPaid || 0) : 0;
   const totalDue = client.amountDue;
   const totalPaid = client.amountPaid + openingPaid;
   const remaining = totalDue - totalPaid;
 
-  y = summaryCards(doc, y, [
-    ["Opening Paid", formatCurrency(openingPaid), "ink"],
-    ["Total Due", formatCurrency(totalDue), "navy" as any],
-    ["Total Paid", formatCurrency(totalPaid), "success"],
-    ["Remaining", formatCurrency(remaining), "danger"],
-  ]);
-  y += 2;
+  let y = 66;
+  y = supplierMetaBar(doc, y, {
+    stmtNo: `AV-CS-${client.id.replace(/[^0-9A-Z]/gi, "")}-${new Date().getFullYear()}`,
+    period: periodLabel,
+    groupLabel: client.packageType ? `${client.packageType} Package · Head ${client.headId}` : undefined,
+  });
+
+  y = clientIdentityCard(doc, y, client);
+
+  const pctPaid = totalDue > 0 ? Math.max(0, Math.min(100, (totalPaid / totalDue) * 100)) : 0;
+  y = executiveSnapshot(doc, y, {
+    payable: totalDue,
+    paid: totalPaid,
+    remaining,
+    bf: includeOpening && openingPaid > 0 ? openingPaid : undefined,
+    purchases: opts.bookings ? opts.bookings.length : 1,
+    payments: filtered.length,
+    pctPaid,
+  });
 
   if (opts.bookings && opts.bookings.length) {
     y = renderServiceSections(doc, y, opts.bookings);
   }
 
-  if (filtered.length) {
-    y = sectionTitle(doc, "Payment History", y); y += 4;
+  // Payment receipts table
+  if (filtered.length || (includeOpening && openingPaid > 0)) {
+    y = categoryHeading(doc, y, "Payments Received", filtered.length + (openingPaid > 0 ? 1 : 0), totalPaid, "success");
+    const body: any[] = [];
+    if (includeOpening && openingPaid > 0) {
+      body.push([
+        { content: "Opening Paid (B/F)", colSpan: 3, styles: { fontStyle: "bold" as const, fillColor: ROW_ALT } },
+        { content: formatCurrency(openingPaid), styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
+      ]);
+    }
+    for (const p of filtered) {
+      body.push([
+        fmtDate(p.date), p.id, p.note || p.referenceName || "Payment Received",
+        { content: formatCurrency(p.amount), styles: { halign: "right" as const, textColor: SUCCESS } },
+      ]);
+    }
     brandTable(doc, {
       startY: y + 1,
-      head: [["Date", "Receipt", "Description", "Amount"]],
-      body: filtered.map((e) => [fmtDate(e.date), e.id, e.note || e.referenceName, { content: formatCurrency(e.amount), styles: { halign: "right" as const, textColor: SUCCESS } }]),
+      head: [["Date", "Receipt #", "Particulars / Notes", "Amount"]],
+      body,
+      foot: [[
+        { content: "Total Received", colSpan: 3, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
+        { content: formatCurrency(totalPaid), styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: SUCCESS } },
+      ]],
     });
-    y = (doc as any).lastAutoTable.finalY + 4;
+    y = (doc as any).lastAutoTable.finalY + 7;
   }
 
-  totalsBand(doc, y, "Balance Due", formatCurrency(remaining));
+  // Reconciliation summary
+  y = reconciliationBlock(doc, y, {
+    openingPayable: undefined,
+    openingPaid: includeOpening && openingPaid > 0 ? openingPaid : undefined,
+    totalPurchases: totalDue,
+    totalPaid: filtered.reduce((s, e) => s + e.amount, 0),
+    grandPayable: totalDue,
+    grandPaid: totalPaid,
+  });
+
+  closingHero(doc, y, remaining, {
+    title: "CLOSING BALANCE",
+    subtitle: "Net balance receivable from client as of statement date.",
+    positiveLabel: "Outstanding — Payment Due",
+    negativeLabel: "Overpayment / Advance Credit",
+  });
 
   footer(doc);
   save(doc, `Avery_Client_Statement_${client.id}.pdf`);
@@ -1340,13 +1526,14 @@ export function generateClientStatement(client: Client, entries: LedgerEntry[], 
 // =========================================================================
 //  PAYMENT HISTORY (generic, used by DetailDialog "History" buttons)
 // =========================================================================
-export function generatePaymentHistory(
+export async function generatePaymentHistory(
   title: string,
   ownerInfo: Array<[string, string]>,
   entries: LedgerEntry[],
   summary: Array<[string, string, string?]>
 ) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   header(doc, "Payment History");
 
   let y = 44;
@@ -1381,8 +1568,9 @@ export function generatePaymentHistory(
 // =========================================================================
 //  INVOICE
 // =========================================================================
-export function generateInvoice(booking: Booking, clients: Client[], agent?: Agent, supplier?: Supplier) {
+export async function generateInvoice(booking: Booking, clients: Client[], agent?: Agent, supplier?: Supplier) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   header(doc, "Tax Invoice");
 
   let y = 44;
@@ -1396,7 +1584,7 @@ export function generateInvoice(booking: Booking, clients: Client[], agent?: Age
   // Meta strip
   doc.setFillColor(...NAVY);
   doc.rect(14, y, 182, 7, "F");
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(9);
   doc.setTextColor(...WHITE);
   doc.text(`Invoice #INV-${booking.headId.replace("AV-HD-", "")}   ·   Package: ${booking.packageType}`, 18, y + 5);
@@ -1427,7 +1615,7 @@ export function generateInvoice(booking: Booking, clients: Client[], agent?: Age
   doc.setDrawColor(...GOLD);
   doc.setLineWidth(0.4);
   doc.rect(110, y, 86, 32);
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(9);
   doc.setTextColor(...INK);
   doc.text("Total Amount", 114, y + 7);
@@ -1440,13 +1628,13 @@ export function generateInvoice(booking: Booking, clients: Client[], agent?: Age
   doc.setFillColor(...GOLD);
   doc.rect(110, y + 19, 86, 13, "F");
   doc.setTextColor(...WHITE);
-  doc.setFont("times", "bold");
+  setSerif(doc, "bold");
   doc.setFontSize(11);
   doc.text("BALANCE DUE", 114, y + 27.5);
   doc.text(formatCurrency(balance), 192, y + 27.5, { align: "right" });
 
   if (agent || supplier) {
-    doc.setFont("helvetica", "italic");
+    setSans(doc, "italic");
     doc.setFontSize(7.5);
     doc.setTextColor(...MUTED);
     doc.text(`Agent: ${agent?.name || "Direct"}   ·   Supplier: ${supplier?.companyName || "—"}`, 14, y + 36);
@@ -1459,8 +1647,9 @@ export function generateInvoice(booking: Booking, clients: Client[], agent?: Age
 // =========================================================================
 //  PAYMENT RECEIPT
 // =========================================================================
-export function generatePaymentReceipt(entry: LedgerEntry, opts?: { clientName?: string; method?: string; handledBy?: string; reference?: string }) {
+export async function generatePaymentReceipt(entry: LedgerEntry, opts?: { clientName?: string; method?: string; handledBy?: string; reference?: string }) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   header(doc, "Payment Receipt");
 
   let y = 44;
@@ -1522,7 +1711,7 @@ export function generatePaymentReceipt(entry: LedgerEntry, opts?: { clientName?:
   doc.setLineWidth(0.2);
   doc.line(20, y + 6, 80, y + 6);
   doc.line(130, y + 6, 190, y + 6);
-  doc.setFont("helvetica", "normal");
+  setSans(doc, "normal");
   doc.setFontSize(8);
   doc.setTextColor(...INK);
   doc.text("Authorized Signature", 30, y + 11);
@@ -1539,8 +1728,9 @@ export function generatePaymentReceipt(entry: LedgerEntry, opts?: { clientName?:
 // =========================================================================
 //  VOUCHERS — Hotel / Flight / Transport
 // =========================================================================
-export function generateHotelVoucher(booking: Booking, clients: Client[], hotels: HotelService[], opts?: { transports?: TransportService[]; flights?: FlightService[]; voucherSuffix?: string }) {
+export async function generateHotelVoucher(booking: Booking, clients: Client[], hotels: HotelService[], opts?: { transports?: TransportService[]; flights?: FlightService[]; voucherSuffix?: string }) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   const subtitle = booking.packageType === "Umrah" ? "Umrah Hotel Voucher" : booking.packageType === "Hajj" ? "Hajj Hotel Voucher" : "Hotel Voucher";
   header(doc, subtitle);
 
@@ -1594,8 +1784,9 @@ export function generateHotelVoucher(booking: Booking, clients: Client[], hotels
   save(doc, `Avery_Hotel_Voucher_${booking.headId}${cityTag}.pdf`);
 }
 
-export function generateFlightVoucher(booking: Booking, clients: Client[], flights: FlightService[]) {
+export async function generateFlightVoucher(booking: Booking, clients: Client[], flights: FlightService[]) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   header(doc, "Flight Voucher");
   let y = 44;
   y = fromAndTo(doc, y, "Booking", [
@@ -1621,8 +1812,9 @@ export function generateFlightVoucher(booking: Booking, clients: Client[], fligh
   save(doc, `Avery_Flight_Voucher_${booking.headId}.pdf`);
 }
 
-export function generateTransportVoucher(booking: Booking, clients: Client[], transports: TransportService[]) {
+export async function generateTransportVoucher(booking: Booking, clients: Client[], transports: TransportService[]) {
   const doc = new jsPDF();
+  await loadPdfFonts(doc);
   header(doc, "Transport Voucher");
   let y = 44;
   y = fromAndTo(doc, y, "Booking", [

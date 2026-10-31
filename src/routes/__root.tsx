@@ -70,10 +70,10 @@ function RootComponent() {
   const location = useLocation();
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex min-h-screen bg-background" suppressHydrationWarning>
       <AppSidebar />
-      <main className="min-w-0 flex-1 px-4 pb-8 pt-20 md:ml-[260px] md:px-8 md:pt-8">
-        <div key={location.pathname} className="page-transition">
+      <main className="min-w-0 flex-1 px-4 pb-8 pt-20 md:ml-[260px] md:px-8 md:pt-8" suppressHydrationWarning>
+        <div key={location.pathname} className="page-transition" suppressHydrationWarning>
           <Outlet />
         </div>
       </main>

@@ -82,30 +82,27 @@ export function handleFirestoreError(
 }
 
 /**
- * Validate Connection to Firestore on startup
- * Calls getDocFromServer to verify connectivity
+ * Validate Connection to Firestore
+ * Only runs remote probe when authenticated or explicitly requested
  */
 export async function testConnection(): Promise<{ ok: boolean; message: string }> {
   if (typeof window === "undefined") {
     return { ok: true, message: "Server-side render (bypassed)" };
   }
-  const path = "test/connection";
+  if (!auth.currentUser) {
+    return { ok: true, message: "Local mode active (sign in to sync with Cloud DB)" };
+  }
   try {
     await getDocFromServer(doc(db, "test", "connection"));
     return { ok: true, message: "Connected to Cloud Firestore" };
   } catch (error) {
-    if (error instanceof Error && error.message.includes("the client is offline")) {
-      console.error("Please check your Firebase configuration.");
-      return { ok: false, message: "Client is offline or configuration unreachable" };
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("the client is offline") || msg.includes("token-service-api")) {
+      return { ok: false, message: "Cloud connection offline or token service pending" };
     }
     // If permission or not found, it still proves connection reached Firestore server
     return { ok: true, message: "Connection verified" };
   }
-}
-
-// Auto-run connection test when booted in client
-if (typeof window !== "undefined") {
-  testConnection();
 }
 
 /**

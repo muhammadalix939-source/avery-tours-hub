@@ -74,7 +74,7 @@ export default function AppSidebar() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {store.hasUndo && store.hasUndo() && (
+          {mounted && store.hasUndo && store.hasUndo() && (
             <button
               onClick={() => store.undoLastAction && store.undoLastAction()}
               title="Undo last action"

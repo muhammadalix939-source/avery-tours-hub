@@ -1,6 +1,6 @@
 import { Link, useLocation } from "@tanstack/react-router";
 import {
-  LayoutDashboard, BookOpen, Users, UserCog, Truck, CreditCard, Search, FileText, Settings, Receipt, BarChart3, Layers, Bell, Menu, X, Plane, Wallet, Database, RefreshCw, LogOut, Sparkles,
+  LayoutDashboard, BookOpen, Users, UserCog, Truck, CreditCard, Search, FileText, Settings, Receipt, BarChart3, Layers, Bell, Menu, X, Plane, Wallet, Database, RefreshCw, LogOut, Sparkles, HandCoins,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "@/lib/store";
@@ -27,7 +27,7 @@ const sections = [
     { to: "/payments", icon: CreditCard, label: "Payments" },
     { to: "/entries", icon: FileText, label: "Entries" },
     { to: "/expenses", icon: Receipt, label: "Expenses" },
-    { to: "/drawings", icon: Receipt, label: "Drawings" },
+    { to: "/drawings", icon: HandCoins, label: "Drawings" },
     { to: "/reports", icon: BarChart3, label: "Financial Reports" },
   ]},
   { title: "System", items: [
@@ -126,21 +126,21 @@ export default function AppSidebar() {
           </div>
         )}
 
-        <nav className="flex-1 overflow-y-auto px-2.5 py-2 sidebar-scroll">
+        <nav className="sidebar-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
           {sections.map((s) => (
-            <div key={s.title} className="mb-2">
-              <p className="mb-0.5 px-2 text-[9.5px] font-bold uppercase tracking-[0.16em] text-muted-foreground/70">{s.title}</p>
+            <div key={s.title} className="mb-3">
+              <p className="mb-1.5 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground/80">{s.title}</p>
               <div className="space-y-0.5">
                 {s.items.map((item) => {
                   const isActive = location.pathname === item.to || (item.to !== "/" && location.pathname.startsWith(item.to));
                   return (
                     <Link key={item.to} to={item.to}
-                      className={`relative flex items-center gap-2.5 rounded px-2.5 py-1.5 text-[12.5px] leading-tight transition-all touch-effect ${isActive ? "bg-sidebar-accent font-semibold text-foreground shadow-sm" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"}`}
+                      className={`relative flex items-center gap-3 rounded-md px-3 py-[7px] text-sm transition-all touch-effect ${isActive ? "bg-sidebar-accent font-semibold text-foreground shadow-sm" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"}`}
                     >
-                      {isActive && <span className="absolute left-0 top-1 bottom-1 w-[2.5px] rounded-r bg-primary gold-glow" />}
-                      <item.icon className={`h-3.5 w-3.5 shrink-0 ${isActive ? "text-primary" : ""}`} />
-                      <span className="flex-1 truncate">{item.label}</span>
-                      {mounted && item.to === "/alerts" && unread > 0 && <span className="rounded-full bg-destructive px-1.5 py-0.2 text-[9px] font-semibold leading-none text-destructive-foreground">{unread}</span>}
+                      {isActive && <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r bg-primary gold-glow" />}
+                      <item.icon className={`h-4 w-4 shrink-0 ${isActive ? "text-primary" : ""}`} />
+                      <span className="flex-1">{item.label}</span>
+                      {mounted && item.to === "/alerts" && unread > 0 && <span className="rounded-full bg-destructive px-1.5 py-0.5 text-[10px] font-semibold leading-none text-destructive-foreground">{unread}</span>}
                     </Link>
                   );
                 })}
@@ -149,81 +149,67 @@ export default function AppSidebar() {
           ))}
         </nav>
 
-        {/* Database & Cloud Connection Status */}
-        <div className="shrink-0 border-t border-sidebar-border bg-sidebar/80 p-2">
-          <div className="rounded border border-border/50 bg-card/50 p-2">
-            <div className="flex items-center justify-between mb-1.5">
-              <div className="flex items-center gap-1.5">
-                <span className={`h-1.5 w-1.5 rounded-full ${mounted && user ? "bg-emerald-500 animate-pulse" : "bg-amber-500"}`} />
-                <span className="text-[10px] font-medium text-foreground">
-                  {mounted && user ? "Cloud DB Active" : "Local DB (Ready)"}
-                </span>
-              </div>
-              <span className="text-[8.5px] uppercase tracking-wider text-muted-foreground font-mono">
-                Firestore
-              </span>
+        {/* Database & Cloud connection — one compact row so the whole menu fits a laptop screen */}
+        <div className="shrink-0 border-t border-sidebar-border bg-sidebar/80 px-3 py-2.5">
+          <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-card/60 px-2.5 py-2">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${mounted && user ? "bg-emerald-500 animate-pulse" : "bg-amber-500"}`} />
+            <div className="min-w-0 flex-1 leading-tight">
+              <p className="text-[11px] font-medium text-foreground">{mounted && user ? "Cloud DB active" : "Local DB (ready)"}</p>
+              <p className="truncate text-[10px] text-muted-foreground">{mounted && user ? user.email || user.displayName : "Not synced to cloud"}</p>
             </div>
-
             {mounted && user ? (
-              <div className="space-y-1.5">
-                <div className="truncate text-[10px] text-muted-foreground">
-                  {user.email || user.displayName}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={async () => {
-                      try {
-                        toast.loading("Syncing with Firestore...", { id: "cloud-sync" });
-                        await store.syncToCloud();
-                        toast.success("Synced with Cloud DB", { id: "cloud-sync" });
-                      } catch {
-                        toast.error("Sync failed", { id: "cloud-sync" });
-                      }
-                    }}
-                    disabled={store.cloudSyncStatus === "syncing"}
-                    className="flex flex-1 items-center justify-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20 transition-colors"
-                  >
-                    <RefreshCw className={`h-2.5 w-2.5 ${store.cloudSyncStatus === "syncing" ? "animate-spin" : ""}`} />
-                    Sync Cloud
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await logOut();
-                      setUser(null);
-                      toast.info("Signed out of Cloud DB");
-                    }}
-                    title="Sign Out"
-                    className="rounded border border-border p-0.5 text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    <LogOut className="h-2.5 w-2.5" />
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div>
+              <>
                 <button
+                  aria-label="Sync cloud"
+                  title="Sync with cloud"
+                  disabled={store.cloudSyncStatus === "syncing"}
                   onClick={async () => {
                     try {
-                      const u = await signInWithGoogle();
-                      setUser(u);
-                      toast.success(`Connected as ${u.email}`);
+                      toast.loading("Syncing with Firestore...", { id: "cloud-sync" });
                       await store.syncToCloud();
-                    } catch (err: unknown) {
-                      toast.error(err instanceof Error ? err.message : "Sign-in failed");
+                      toast.success("Synced with Cloud DB", { id: "cloud-sync" });
+                    } catch {
+                      toast.error("Sync failed", { id: "cloud-sync" });
                     }
                   }}
-                  className="flex w-full items-center justify-center gap-1.5 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                  className="rounded-md p-1.5 text-primary transition-colors hover:bg-primary/15 disabled:opacity-50"
                 >
-                  <Database className="h-3 w-3" />
-                  Connect Cloud DB
+                  <RefreshCw className={`h-3.5 w-3.5 ${store.cloudSyncStatus === "syncing" ? "animate-spin" : ""}`} />
                 </button>
-              </div>
+                <button
+                  aria-label="Sign out"
+                  title="Sign out"
+                  onClick={async () => {
+                    await logOut();
+                    setUser(null);
+                    toast.info("Signed out of Cloud DB");
+                  }}
+                  className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                </button>
+              </>
+            ) : (
+              <button
+                aria-label="Connect cloud database"
+                title="Connect Google Cloud Firestore for persistence across devices"
+                onClick={async () => {
+                  try {
+                    const u = await signInWithGoogle();
+                    setUser(u);
+                    toast.success(`Connected as ${u.email}`);
+                    await store.syncToCloud();
+                  } catch (err: unknown) {
+                    toast.error(err instanceof Error ? err.message : "Sign-in failed");
+                  }
+                }}
+                className="flex shrink-0 items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                <Database className="h-3 w-3" />
+                Connect
+              </button>
             )}
           </div>
-        </div>
-
-        <div className="shrink-0 border-t border-sidebar-border px-3 py-1.5 text-[9px] uppercase tracking-[0.14em] text-muted-foreground/75 text-center">
-          Umrah · Hajj · Tours · Visa
         </div>
       </aside>
     </>

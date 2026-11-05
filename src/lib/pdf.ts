@@ -192,7 +192,19 @@ function header(doc: jsPDF, title: string) {
   // Wordmark
   doc.setTextColor(...GOLD_LT);
   setSerif(doc, "bold");
-  doc.setFontSize(14);
+  // Fit wordmark and document title side by side without overlapping (long titles such as
+  // "Agent Account Statement" used to run through the company name).
+  setSerif(doc, "bold");
+  doc.setFontSize(10);
+  const titleW = doc.getTextWidth(title.toUpperCase());
+  const wordmarkMaxW = Math.max(40, 196 - titleW - 38 - 6);
+  let wordmarkSize = 14;
+  setSerif(doc, "bold");
+  doc.setFontSize(wordmarkSize);
+  while (wordmarkSize > 9 && doc.getTextWidth(COMPANY) > wordmarkMaxW) {
+    wordmarkSize -= 0.5;
+    doc.setFontSize(wordmarkSize);
+  }
   doc.text(COMPANY, 38, 21.5);
 
   setSerif(doc, "italic");

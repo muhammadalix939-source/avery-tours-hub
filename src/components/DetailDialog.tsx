@@ -34,7 +34,7 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
 
   function handleDownload() {
     if (!data) return;
-    if (type === "client") generateClientStatement(data as Client, entries);
+    if (type === "client") generateClientStatement(data as Client, entries, { clients: allClients });
     if (type === "supplier") generateSupplierLedger(data as Supplier, entries);
     if (type === "agent") generateAgentReport(data as Agent, entries, { bookings: allBookings, clients: allClients });
   }

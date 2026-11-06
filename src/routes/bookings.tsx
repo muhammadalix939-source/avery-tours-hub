@@ -15,6 +15,7 @@ import SortBar from "@/components/SortBar";
 import { sortEntities, type SortOptionKey } from "@/lib/sort-utils";
 import { formatCurrency, getClientName, PACKAGE_TYPES, computeBookingProfit, computeBookingFinancials, type Booking, type Client } from "@/lib/data";
 import { useStore } from "@/lib/store";
+import { getHeadName } from "@/lib/heads";
 import { computeGroupUsedPax } from "@/lib/store";
 import { getPKTDate } from "@/lib/date-utils";
 import { generateInvoice, generatePaymentHistory } from "@/lib/pdf";
@@ -105,7 +106,7 @@ function BookingsPage() {
     return sortEntities(list, sortKey, {
       date: (b) => b.travelDate || b.createdAt,
       amount: (b) => b.totalAmount,
-      name: (b) => b.headId,
+      name: (b) => getHeadName(b.headId, store.clients).toLowerCase(),
     });
   }, [store.bookings, store.clients, tabFilter, lossDealsOnly, sortKey, searchQuery]);
 
@@ -639,7 +640,7 @@ function BookingsPage() {
               <div className="rounded-lg border border-border/50 bg-background/50 p-2.5 space-y-1.5 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-semibold text-foreground">Discount Settlement Method:</span>
-                  <span className="text-[10px] text-muted-foreground font-mono">
+                  <span className="whitespace-nowrap text-[10px] text-muted-foreground font-mono">
                     Agent Commission: {formatCurrency(rawComm)}
                   </span>
                 </div>
@@ -945,7 +946,7 @@ function BookingsPage() {
             }`}
           >
             <span>All Records</span>
-            <span className="text-[10px] text-muted-foreground font-mono">({allCount})</span>
+            <span className="whitespace-nowrap text-[10px] text-muted-foreground font-mono">({allCount})</span>
           </button>
 
           {/* Loss Deals Alert Filter Button */}
@@ -996,11 +997,11 @@ function BookingsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
-                <th className="px-4 py-3">Head ID</th><th className="px-4 py-3">Package</th><th className="px-4 py-3">Members</th>
-                <th className="px-4 py-3">Agent</th><th className="px-4 py-3">Total</th><th className="px-4 py-3">Received</th>
-                <th className="px-4 py-3">Pending</th><th className="px-4 py-3">Profit Status</th>
-                <th className="px-4 py-3">Fulfillment</th>
-                <th className="px-4 py-3">Status</th><th className="px-4 py-3">Travel</th><th className="px-4 py-3">Actions</th>
+                <th className="px-3 py-3">Head ID / Name</th><th className="px-3 py-3">Package</th><th className="px-3 py-3">Members</th>
+                <th className="px-3 py-3">Agent</th><th className="px-3 py-3">Total</th><th className="px-3 py-3">Received</th>
+                <th className="px-3 py-3">Pending</th><th className="px-3 py-3">Profit Status</th>
+                <th className="px-3 py-3">Fulfillment</th>
+                <th className="px-3 py-3">Status</th><th className="px-3 py-3">Travel</th><th className="px-3 py-3">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1014,14 +1015,17 @@ function BookingsPage() {
 
                 return (
                   <tr key={b.id} className="border-b border-border/50 transition-colors hover:bg-accent/30">
-                    <td className="px-4 py-3 font-semibold text-primary">{b.headId}</td>
-                    <td className="px-4 py-3">{b.packageType}</td>
-                    <td className="px-4 py-3">{clients.length}</td>
-                    <td className="px-4 py-3 text-muted-foreground">{b.agentId || "Direct"}</td>
-                    <td className="px-4 py-3 font-mono">{formatCurrency(b.totalAmount)}</td>
-                    <td className="px-4 py-3 text-success font-mono">{formatCurrency(b.amountReceived)}</td>
-                    <td className="px-4 py-3 text-destructive font-mono">{formatCurrency(pending)}</td>
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-3">
+                      <div className="font-semibold text-primary">{b.headId}</div>
+                      <div className="max-w-[180px] truncate text-xs text-foreground/80" title={getHeadName(b.headId, store.clients)}>{getHeadName(b.headId, store.clients)}</div>
+                    </td>
+                    <td className="px-3 py-3">{b.packageType}</td>
+                    <td className="px-3 py-3">{clients.length}</td>
+                    <td className="whitespace-nowrap px-3 py-3 text-muted-foreground">{b.agentId || "Direct"}</td>
+                    <td className="whitespace-nowrap px-3 py-3 font-mono">{formatCurrency(b.totalAmount)}</td>
+                    <td className="whitespace-nowrap px-3 py-3 text-success font-mono">{formatCurrency(b.amountReceived)}</td>
+                    <td className="whitespace-nowrap px-3 py-3 text-destructive font-mono">{formatCurrency(pending)}</td>
+                    <td className="px-3 py-3">
                       {(() => {
                         const fin = computeBookingFinancials(b);
                         return (
@@ -1038,10 +1042,10 @@ function BookingsPage() {
                               </>
                             ) : (
                               <>
-                                <span className="font-mono font-bold text-xs text-foreground">
+                                <span className="whitespace-nowrap font-mono font-bold text-xs text-foreground">
                                   {formatCurrency(fin.netProfit)}
                                 </span>
-                                <span className="text-[10px] text-muted-foreground font-mono">
+                                <span className="whitespace-nowrap text-[10px] text-muted-foreground font-mono">
                                   ({fin.marginPercent.toFixed(1)}%)
                                 </span>
                               </>
@@ -1065,8 +1069,8 @@ function BookingsPage() {
                                 store.toggleBookingProfitStatus(b.id);
                                 toast.success(
                                   isEarned
-                                    ? `Reverted ${b.headId} to Unearned Profit`
-                                    : `Converted ${b.headId} to Earned Actual Profit`
+                                    ? `Reverted ${b.headId} (${getHeadName(b.headId, store.clients)}) to Unearned Profit`
+                                    : `Converted ${b.headId} (${getHeadName(b.headId, store.clients)}) to Earned Actual Profit`
                                 );
                               }}
                               className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider transition ${
@@ -1082,7 +1086,7 @@ function BookingsPage() {
                         );
                       })()}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-3">
                       {isFulfilled ? (
                         <div className="space-y-1">
                           <span className="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-bold text-emerald-400 flex items-center gap-1 w-fit">
@@ -1093,7 +1097,7 @@ function BookingsPage() {
                             type="button"
                             onClick={() => {
                               store.toggleBookingCompleted(b.id);
-                              toast.success(`Reopened ${b.headId} back to Active Bookings`);
+                              toast.success(`Reopened ${b.headId} (${getHeadName(b.headId, store.clients)}) back to Active Bookings`);
                             }}
                             className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1 transition"
                             title="Reopen into Active bookings"
@@ -1118,7 +1122,7 @@ function BookingsPage() {
                             variant="outline"
                             onClick={() => {
                               store.toggleBookingCompleted(b.id);
-                              toast.success(`Marked ${b.headId} as Completed / Fulfilled`);
+                              toast.success(`Marked ${b.headId} (${getHeadName(b.headId, store.clients)}) as Completed / Fulfilled`);
                             }}
                             className="h-6 px-2 text-[10px] gap-1 hover:bg-emerald-600 hover:text-white hover:border-emerald-600 transition-colors"
                           >
@@ -1128,9 +1132,9 @@ function BookingsPage() {
                         </div>
                       )}
                     </td>
-                    <td className="px-4 py-3"><StatusBadge status={b.status} /></td>
-                    <td className="px-4 py-3 text-muted-foreground text-xs">{b.travelDate}</td>
-                    <td className="px-4 py-3">
+                    <td className="px-3 py-3"><StatusBadge status={b.status} /></td>
+                    <td className="px-3 py-3 text-muted-foreground text-xs">{b.travelDate}</td>
+                    <td className="px-3 py-3">
                       <div className="flex gap-1">
                         <button onClick={() => setViewHead(b.headId)} className="rounded p-1 hover:bg-accent" title="View booking"><Eye className="h-3.5 w-3.5 text-primary" /></button>
                         <button onClick={() => downloadInvoice(b)} className="rounded p-1 hover:bg-accent" title="Download Invoice"><FileText className="h-3.5 w-3.5 text-success" /></button>
@@ -1165,7 +1169,7 @@ function BookingsPage() {
         return (
           <motion.div key={b.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="glass-card rounded-xl p-5">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-sm font-semibold"><span className="text-primary">{b.headId}</span> — Clients ({clients.length})</h3>
+              <h3 className="text-sm font-semibold"><span className="text-primary">{b.headId}</span> — {getHeadName(b.headId, store.clients)} <span className="font-normal text-muted-foreground">· Clients ({clients.length})</span></h3>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-muted-foreground">Supplier: {b.supplierId} | Destination: {b.destination || "—"}</span>
                 <Button
@@ -1235,7 +1239,7 @@ function BookingsPage() {
 
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="bg-card border-border max-w-xl">
-          <DialogHeader><DialogTitle>Edit Booking — {selected?.headId}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>Edit Booking — {selected?.headId}{selected ? ` · ${getHeadName(selected.headId, store.clients)}` : ""}</DialogTitle></DialogHeader>
           {editFormFields}
           <Button onClick={handleEdit} className="w-full">Save Changes</Button>
         </DialogContent>

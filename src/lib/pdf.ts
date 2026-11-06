@@ -192,7 +192,19 @@ function header(doc: jsPDF, title: string) {
   // Wordmark
   doc.setTextColor(...GOLD_LT);
   setSerif(doc, "bold");
-  doc.setFontSize(14);
+  // Fit wordmark and document title side by side without overlapping (long titles such as
+  // "Agent Account Statement" used to run through the company name).
+  setSerif(doc, "bold");
+  doc.setFontSize(10);
+  const titleW = doc.getTextWidth(title.toUpperCase());
+  const wordmarkMaxW = Math.max(40, 196 - titleW - 38 - 6);
+  let wordmarkSize = 14;
+  setSerif(doc, "bold");
+  doc.setFontSize(wordmarkSize);
+  while (wordmarkSize > 9 && doc.getTextWidth(COMPANY) > wordmarkMaxW) {
+    wordmarkSize -= 0.5;
+    doc.setFontSize(wordmarkSize);
+  }
   doc.text(COMPANY, 38, 21.5);
 
   setSerif(doc, "italic");
@@ -413,6 +425,8 @@ export interface StatementOptions {
   toDate?: string;
   /** Bookings used to render Hotel/Flight/Visa/Transport/Other sections. */
   bookings?: Booking[];
+  /** All clients; lets a client statement tell which member is the lead of a Head (unassigned charges belong to the lead). */
+  clients?: Client[];
   /** Include opening balance (brought-forward) in totals & opening row. Default true. */
   includeOpening?: boolean;
   /** Optional purchase-group filter (only entries with matching groupId are included). */
@@ -527,10 +541,13 @@ export async function generateSupplierLedger(supplier: Supplier, entries: Ledger
 
   const purchases = filtered.filter((e) => e.type === "purchase");
   const payments = filtered.filter((e) => e.type === "supplier_payment");
+  // Supplier refunds and discounts are credits that reduce what we owe (same rule as the Suppliers page).
+  const credits = filtered.filter((e) => e.type === "supplier_refund" || e.type === "supplier_discount");
 
   const totalPurchases = purchases.reduce((s, e) => s + e.amount, 0);
+  const totalCredits = credits.reduce((s, e) => s + e.amount, 0);
   const totalPaid = payments.reduce((s, e) => s + e.amount, 0);
-  const grandPayable = openingPayable + totalPurchases;
+  const grandPayable = openingPayable + totalPurchases - totalCredits;
   const grandPaid = openingPaid + totalPaid;
   const remaining = grandPayable - grandPaid;
 
@@ -581,8 +598,27 @@ export async function generateSupplierLedger(supplier: Supplier, entries: Ledger
     y = (doc as any).lastAutoTable.finalY + 7;
   }
 
+  if (credits.length) {
+    y = categoryHeading(doc, y, "Refunds & Discounts (Credits)", credits.length, totalCredits, "success");
+    brandTable(doc, {
+      startY: y + 1,
+      head: [["Date", "Ref #", "Type / Note", "Amount"]],
+      body: credits.map((c) => [
+        fmtDate(c.date), c.id,
+        [c.type === "supplier_refund" ? "Supplier Refund" : "Supplier Discount", c.note].filter(Boolean).join(" — "),
+        { content: `- ${formatCurrency(c.amount)}`, styles: { halign: "right" as const, textColor: SUCCESS } },
+      ]),
+      foot: [[
+        { content: "Total Credits (deducted from payable)", colSpan: 3, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
+        { content: `- ${formatCurrency(totalCredits)}`, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: SUCCESS } },
+      ]],
+    });
+    y = (doc as any).lastAutoTable.finalY + 7;
+  }
+
   if (payments.length || (includeOpening && openingPaid > 0)) {
-    y = categoryHeading(doc, y, "Payments Received", payments.length, grandPaid, "success");
+    // We pay the supplier, so these are payments MADE (the client statement says "Payments Received").
+    y = categoryHeading(doc, y, "Payments Made", payments.length, grandPaid, "success");
     const body: any[] = [];
     if (includeOpening && openingPaid > 0) {
       body.push([
@@ -598,7 +634,7 @@ export async function generateSupplierLedger(supplier: Supplier, entries: Ledger
     }
     brandTable(doc, {
       startY: y + 1,
-      head: [["Date", "Receipt", "Note", "Amount"]],
+      head: [["Date", "Ref #", "Note", "Amount"]],
       body,
       foot: [[
         { content: "Total Paid", colSpan: 3, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
@@ -611,6 +647,7 @@ export async function generateSupplierLedger(supplier: Supplier, entries: Ledger
   y = reconciliationBlock(doc, y, {
     openingPayable: includeOpening ? openingPayable : undefined,
     openingPaid: includeOpening ? openingPaid : undefined,
+    credits: totalCredits || undefined,
     totalPurchases, totalPaid, grandPayable, grandPaid,
   });
 
@@ -686,7 +723,7 @@ function supplierHeader(doc: jsPDF) {
   executiveHeader(doc, "SUPPLIER", "STATEMENT");
 }
 
-function supplierMetaBar(doc: jsPDF, y: number, meta: { stmtNo: string; period: string; groupLabel?: string }): number {
+function supplierMetaBar(doc: jsPDF, y: number, meta: { stmtNo: string; period: string; groupLabel?: string; groupPrefix?: string }): number {
   const h = meta.groupLabel ? 13 : 9;
   doc.setFillColor(...IVORY);
   doc.setDrawColor(...GOLD);
@@ -720,7 +757,7 @@ function supplierMetaBar(doc: jsPDF, y: number, meta: { stmtNo: string; period: 
     setSans(doc, "italic");
     doc.setFontSize(7.5);
     doc.setTextColor(...GOLD);
-    doc.text(`Filtered by Group  ·  ${meta.groupLabel}`, 19, y + 11.5);
+    doc.text(meta.groupPrefix === "" ? meta.groupLabel : `${meta.groupPrefix ?? "Filtered by Group  ·  "}${meta.groupLabel}`, 19, y + 11.5);
   }
   doc.setTextColor(...INK);
   return y + h + 3;
@@ -837,7 +874,7 @@ function clientIdentityCard(doc: jsPDF, y: number, c: Client): number {
 
 function executiveSnapshot(
   doc: jsPDF, y: number,
-  data: { payable: number; paid: number; remaining: number; bf?: number; purchases: number; payments: number; pctPaid: number }
+  data: { payable: number; paid: number; remaining: number; bf?: number; purchases: number; payments: number; pctPaid: number; txLabels?: [string, string] }
 ): number {
   // Section title
   setSerif(doc, "italic");
@@ -858,7 +895,7 @@ function executiveSnapshot(
     { label: "Total Payable", value: formatCurrency(data.payable), tone: "navy" },
     { label: "Total Paid", value: formatCurrency(data.paid), tone: "success" },
     { label: "Outstanding", value: formatCurrency(data.remaining), tone: data.remaining > 0 ? "danger" : "success" },
-    { label: data.bf !== undefined ? "Brought Forward" : "Transactions", value: data.bf !== undefined ? formatCurrency(data.bf) : `${data.purchases} PUR · ${data.payments} PMT`, tone: "gold" },
+    { label: data.bf !== undefined ? "Brought Forward" : "Transactions", value: data.bf !== undefined ? formatCurrency(data.bf) : `${data.purchases} ${data.txLabels?.[0] ?? "PUR"} · ${data.payments} ${data.txLabels?.[1] ?? "PMT"}`, tone: "gold" },
   ];
   const totalW = 182;
   const gap = 3;
@@ -964,7 +1001,7 @@ function categoryHeading(doc: jsPDF, y: number, label: string, count: number, to
 
 function reconciliationBlock(
   doc: jsPDF, y: number,
-  d: { openingPayable?: number; openingPaid?: number; totalPurchases: number; totalPaid: number; grandPayable: number; grandPaid: number }
+  d: { openingPayable?: number; openingPaid?: number; credits?: number; labels?: { purchases: string; payments: string }; totalPurchases: number; totalPaid: number; grandPayable: number; grandPaid: number }
 ): number {
   y = ensureSpace(doc, y, 40);
   setSerif(doc, "italic");
@@ -983,12 +1020,13 @@ function reconciliationBlock(
   const gap = 4;
   const leftRows: Array<[string, number, boolean?]> = [];
   if (d.openingPayable !== undefined) leftRows.push(["Opening Payable (B/F)", d.openingPayable]);
-  leftRows.push(["New Purchases (Period)", d.totalPurchases]);
+  leftRows.push([d.labels?.purchases ?? "New Purchases (Period)", d.totalPurchases]);
+  if (d.credits) leftRows.push(["Less: Refunds & Discounts", -d.credits]);
   leftRows.push(["Grand Total Payable", d.grandPayable, true]);
 
   const rightRows: Array<[string, number, boolean?]> = [];
   if (d.openingPaid !== undefined) rightRows.push(["Opening Paid (B/F)", d.openingPaid]);
-  rightRows.push(["Payments (Period)", d.totalPaid]);
+  rightRows.push([d.labels?.payments ?? "Payments (Period)", d.totalPaid]);
   rightRows.push(["Grand Total Paid", d.grandPaid, true]);
 
   const rows = Math.max(leftRows.length, rightRows.length);
@@ -1439,7 +1477,19 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
   await loadPdfFonts(doc);
   executiveHeader(doc, "CLIENT", "STATEMENT");
 
-  const filtered = entries.filter((e) => inRange(e.date, opts.fromDate, opts.toDate));
+  // Callers pass every ledger row linked to the client or its Head ID, which includes internal
+  // supplier purchases/payments. A client-facing statement must only show client money:
+  // receipts, extra charges, refunds and discounts that belong to this client or to the whole Head.
+  const inPeriod = entries.filter((e) => inRange(e.date, opts.fromDate, opts.toDate));
+  const isLead = opts.clients ? opts.clients.find((c) => c.headId === client.headId)?.id === client.id : true;
+  const ofThisClient = (e: LedgerEntry) =>
+    (e.headId === client.headId || e.referenceId === client.id) && (e.clientId ? e.clientId === client.id : isLead);
+  const receipts = inPeriod.filter((e) =>
+    e.type === "client_receive" &&
+    (e.referenceId === client.id || (e.headId === client.headId && (!e.referenceId || e.referenceId === client.headId))));
+  const charges = inPeriod.filter((e) => e.type === "client_charge" && ofThisClient(e));
+  const adjustments = inPeriod.filter((e) => (e.type === "client_refund" || e.type === "client_discount") && ofThisClient(e));
+  const filtered = receipts;
   const periodLabel = opts.fromDate || opts.toDate
     ? `${fmtDate(opts.fromDate)} — ${fmtDate(opts.toDate)}`
     : "All-time";
@@ -1455,6 +1505,7 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
     stmtNo: `AV-CS-${client.id.replace(/[^0-9A-Z]/gi, "")}-${new Date().getFullYear()}`,
     period: periodLabel,
     groupLabel: client.packageType ? `${client.packageType} Package · Head ${client.headId}` : undefined,
+    groupPrefix: "",
   });
 
   y = clientIdentityCard(doc, y, client);
@@ -1468,10 +1519,30 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
     purchases: opts.bookings ? opts.bookings.length : 1,
     payments: filtered.length,
     pctPaid,
+    txLabels: ["BKG", "RCPT"],
   });
 
   if (opts.bookings && opts.bookings.length) {
     y = renderServiceSections(doc, y, opts.bookings);
+  }
+
+  // Extra charges billed on top of the package (they are already inside "Total Payable")
+  if (charges.length) {
+    const chargeTotal = charges.reduce((s, e) => s + e.amount, 0);
+    y = categoryHeading(doc, y, "Extra Charges", charges.length, chargeTotal, "navy");
+    brandTable(doc, {
+      startY: y + 1,
+      head: [["Date", "Ref #", "Description", "Amount"]],
+      body: charges.map((c) => [
+        fmtDate(c.date), c.id, [c.chargeCategory, c.note].filter(Boolean).join(" — ") || "Additional charge",
+        { content: formatCurrency(c.amount), styles: { halign: "right" as const } },
+      ]),
+      foot: [[
+        { content: "Total Extra Charges", colSpan: 3, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
+        { content: formatCurrency(chargeTotal), styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
+      ]],
+    });
+    y = (doc as any).lastAutoTable.finalY + 7;
   }
 
   // Payment receipts table
@@ -1500,12 +1571,38 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
       ]],
     });
     y = (doc as any).lastAutoTable.finalY + 7;
+    const listed = filtered.reduce((s, e) => s + e.amount, 0) + openingPaid;
+    if (Math.abs(listed - totalPaid) > 0.5) {
+      // Payments are recorded per booking (Head ID) and allocated across its members, so one
+      // member's share can differ from the receipts listed above. Say so instead of hiding it.
+      setSerif(doc, "italic");
+      doc.setFontSize(7.5);
+      doc.setTextColor(...MUTED);
+      doc.text("Receipts are recorded against the booking (Head " + client.headId + ") and allocated across its members; the total above is this client's allocated share.", 14, y - 3, { maxWidth: 182 });
+      y += 4;
+    }
+  }
+
+  if (adjustments.length) {
+    const adjTotal = adjustments.reduce((s, e) => s + e.amount, 0);
+    y = categoryHeading(doc, y, "Refunds & Discounts", adjustments.length, adjTotal, "success");
+    brandTable(doc, {
+      startY: y + 1,
+      head: [["Date", "Ref #", "Type / Note", "Amount"]],
+      body: adjustments.map((a) => [
+        fmtDate(a.date), a.id,
+        [a.type === "client_refund" ? "Refund to client" : "Discount allowed", a.note].filter(Boolean).join(" — "),
+        { content: formatCurrency(a.amount), styles: { halign: "right" as const } },
+      ]),
+    });
+    y = (doc as any).lastAutoTable.finalY + 7;
   }
 
   // Reconciliation summary
   y = reconciliationBlock(doc, y, {
     openingPayable: undefined,
     openingPaid: includeOpening && openingPaid > 0 ? openingPaid : undefined,
+    labels: { purchases: "Package + Charges (Net)", payments: "Receipts Listed" },
     totalPurchases: totalDue,
     totalPaid: filtered.reduce((s, e) => s + e.amount, 0),
     grandPayable: totalDue,

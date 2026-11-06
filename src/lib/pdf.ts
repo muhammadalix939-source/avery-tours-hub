@@ -1,6 +1,6 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { formatCurrency, getClientName } from "./data";
+import { bookingTotals, cleanName, computeBookingFinancials, formatCurrency, getClientName, idName } from "./data";
 import type {
   Client, Agent, Supplier, Booking,
   HotelService, FlightService, TransportService, VisaService, OtherService,
@@ -324,7 +324,15 @@ function partyBlock(doc: jsPDF, x: number, y: number, w: number, label: string, 
     setSans(doc, "bold");
     doc.text(`${k}:`, x + 4, y + 10 + i * 5);
     setSans(doc, "normal");
-    doc.text(String(v || "—"), x + 28, y + 10 + i * 5);
+    // Long "ID — Name" values shrink slightly, then truncate, instead of running out of the box.
+    let text = String(v || "—");
+    const maxW = w - 32;
+    let size = 8;
+    doc.setFontSize(size);
+    while (size > 6.5 && doc.getTextWidth(text) > maxW) { size -= 0.5; doc.setFontSize(size); }
+    while (text.length > 4 && doc.getTextWidth(text) > maxW) text = text.slice(0, -2).trimEnd() + "…";
+    doc.text(text, x + 28, y + 10 + i * 5);
+    doc.setFontSize(8);
   });
   return y + 6 + lines.length * 5 + 6;
 }
@@ -763,6 +771,28 @@ function supplierMetaBar(doc: jsPDF, y: number, meta: { stmtNo: string; period: 
   return y + h + 3;
 }
 
+/** Navy identity plate headline: "ID — Name" together, wrapped to at most two lines inside the plate. */
+function plateHeadline(doc: jsPDF, id: string, name: string, x: number, y: number, maxW: number): number {
+  const label = cleanName(name) || "—";
+  setSerif(doc, "bold");
+  doc.setFontSize(8.5);
+  doc.setTextColor(...GOLD_LT);
+  doc.text(id, x, y);
+  const idW = doc.getTextWidth(id + "  ");
+  doc.setFontSize(12);
+  doc.setTextColor(...WHITE);
+  const first = doc.splitTextToSize(label, Math.max(20, maxW - idW)) as string[];
+  doc.text(first[0] ?? label, x + idW, y);
+  let lines = 1;
+  const rest = first.slice(1).join(" ");
+  if (rest) {
+    const second = (doc.splitTextToSize(rest, maxW) as string[])[0] ?? "";
+    doc.text(second, x, y + 5.2);
+    lines = 2;
+  }
+  return y + (lines === 2 ? 5.2 : 0);
+}
+
 function supplierIdentityCard(doc: jsPDF, y: number, s: Supplier): number {
   const h = 26;
   // Card
@@ -782,17 +812,11 @@ function supplierIdentityCard(doc: jsPDF, y: number, s: Supplier): number {
   doc.setTextColor(...GOLD_LT);
   doc.text("STATEMENT ISSUED TO", 20, y + 5.5);
 
-  setSerif(doc, "bold");
-  doc.setFontSize(13);
-  doc.setTextColor(...WHITE);
-  doc.text(s.companyName || "—", 20, y + 12.5);
-
+  const sBase = plateHeadline(doc, s.id, s.companyName, 19, y + 12, 55);
   setSans(doc, "normal");
   doc.setFontSize(7.5);
   doc.setTextColor(...GOLD_LT);
-  doc.text(s.id, 20, y + 17.5);
-  doc.setTextColor(...WHITE);
-  doc.text(s.serviceType || "—", 20, y + 22);
+  doc.text(`Supplier  ·  ${s.serviceType || "—"}`, 19, Math.max(sBase + 6, y + 19));
 
   // Right details grid
   const col1 = 82;
@@ -818,7 +842,7 @@ function supplierIdentityCard(doc: jsPDF, y: number, s: Supplier): number {
   return y + h + 5;
 }
 
-function clientIdentityCard(doc: jsPDF, y: number, c: Client): number {
+function clientIdentityCard(doc: jsPDF, y: number, c: Client, headLeadName = ""): number {
   const h = 26;
   // Card
   doc.setFillColor(...WHITE);
@@ -837,17 +861,11 @@ function clientIdentityCard(doc: jsPDF, y: number, c: Client): number {
   doc.setTextColor(...GOLD_LT);
   doc.text("STATEMENT ISSUED TO", 20, y + 5.5);
 
-  setSerif(doc, "bold");
-  doc.setFontSize(13);
-  doc.setTextColor(...WHITE);
-  doc.text(getClientName(c) || "—", 20, y + 12.5);
-
+  const cBase = plateHeadline(doc, c.id, getClientName(c), 19, y + 12, 55);
   setSans(doc, "normal");
   doc.setFontSize(7.5);
   doc.setTextColor(...GOLD_LT);
-  doc.text(`Client ID: ${c.id}`, 20, y + 17.5);
-  doc.setTextColor(...WHITE);
-  doc.text(`Head ID: ${c.headId}`, 20, y + 22);
+  doc.text(`Head ID: ${c.headId}${headLeadName ? "  ·  " + headLeadName : ""}`, 19, Math.max(cBase + 6, y + 19), { maxWidth: 55 });
 
   // Right details grid
   const col1 = 82;
@@ -1289,7 +1307,12 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   const commissionPaid = entries.filter((e) => e.type === "agent_commission" && e.referenceId === agent.id);
 
   // signed movement of the agent account: + increases what he owes us, − reduces it
-  const bookingNet = (b: Booking) => (b.totalAmount || 0) - (b.commission || 0);
+  // Booking totals already include extra charges and are net of refunds/discounts, but this statement lists
+  // charges and refunds as separate ledger rows, so the booking "Sale" is the package net of discounts only.
+  const discountOf = (h: string) => entries.filter((e) => e.type === "client_discount" && e.headId === h).reduce((t, e) => t + e.amount, 0);
+  const bookingSale = (b: Booking) => Math.max(0, (b.baseAmount ?? b.totalAmount ?? 0) - (Number(b.discount) || 0) - discountOf(b.headId));
+  const bookingComm = (b: Booking) => computeBookingFinancials(b).netCommission;
+  const bookingNet = (b: Booking) => bookingSale(b) - bookingComm(b);
   const clientMove = (e: LedgerEntry) => (e.type === "client_charge" ? e.amount : -e.amount);
 
   // ---------- Opening balance ----------
@@ -1309,8 +1332,8 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   const pOther = incOther ? otherRows.filter((e) => within(e.date) || (!from && !to)) : [];
   const pAgentRec = agentReceipts.filter((e) => within(e.date) || (!from && !to));
 
-  const grossSale = pBookings.reduce((s, b) => s + (b.totalAmount || 0), 0);
-  const commission = pBookings.reduce((s, b) => s + (b.commission || 0), 0);
+  const grossSale = pBookings.reduce((s, b) => s + bookingSale(b), 0);
+  const commission = pBookings.reduce((s, b) => s + bookingComm(b), 0);
   const netClient = grossSale - commission;
   const extraCharges = pClientTx.filter((e) => e.type === "client_charge").reduce((s, e) => s + e.amount, 0);
   const refunds = pClientTx.filter((e) => e.type === "client_refund").reduce((s, e) => s + e.amount, 0);
@@ -1326,7 +1349,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   const scopeLabel = scope === "client" ? "Client Business" : scope === "other" ? "Other Sale" : "Client Business + Other Sale";
 
   let y = 44;
-  y = fromAndTo(doc, y, "Agent", [["ID", agent.id], ["Name", agent.name], ["Phone", agent.phone], ["Email", agent.email]]);
+  y = fromAndTo(doc, y, "Agent", [["Agent", idName(agent.id, agent.name)], ["Phone", agent.phone], ["Email", agent.email]]);
 
   doc.setFillColor(...NAVY);
   doc.rect(14, y, 182, 7, "F");
@@ -1358,7 +1381,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
       body: pBookings.length ? pBookings.map((b) => [
         fmtDate(bDate(b)), b.headId, leadName(b.headId), b.packageType || "—",
         String(clients.filter((c) => c.headId === b.headId).length),
-        money(b.totalAmount || 0, INK), money(b.commission || 0, DANGER), money(bookingNet(b)),
+        money(bookingSale(b), INK), money(bookingComm(b), DANGER), money(bookingNet(b)),
       ]) : [[{ content: "No client bookings in this period", colSpan: 8, styles: { halign: "center" as const, textColor: MUTED } }]],
       foot: [[
         { content: "Totals", colSpan: 5, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
@@ -1457,7 +1480,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   void otherCost; // internal profit is never printed on an agent-facing statement
 
   // Commission account (separate)
-  const commEarned = bookings.reduce((s, b) => s + (b.commission || 0), 0) + (agent.openingCommission || 0);
+  const commEarned = bookings.reduce((s, b) => s + bookingComm(b), 0) + (agent.openingCommission || 0);
   const commPaid = commissionPaid.reduce((s, e) => s + e.amount, 0) + (agent.openingPaidCommission || 0);
   y = summaryCards(doc, y, [
     ["Commission Earned", formatCurrency(commEarned), "gold"],
@@ -1508,7 +1531,7 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
     groupPrefix: "",
   });
 
-  y = clientIdentityCard(doc, y, client);
+  y = clientIdentityCard(doc, y, client, (() => { const lead = opts.clients?.find((x) => x.headId === client.headId); return lead && lead.id !== client.id ? getClientName(lead) : ""; })());
 
   const pctPaid = totalDue > 0 ? Math.max(0, Math.min(100, (totalPaid / totalDue) * 100)) : 0;
   y = executiveSnapshot(doc, y, {
@@ -1583,17 +1606,22 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
     }
   }
 
-  if (adjustments.length) {
-    const adjTotal = adjustments.reduce((s, e) => s + e.amount, 0);
-    y = categoryHeading(doc, y, "Refunds & Discounts", adjustments.length, adjTotal, "success");
+  // The discount agreed on the booking itself is carried by the lead member (same rule as the store).
+  const agreedDiscount = isLead ? Number(opts.bookings?.find((b) => b.headId === client.headId)?.discount) || 0 : 0;
+  if (adjustments.length || agreedDiscount > 0) {
+    const adjTotal = adjustments.reduce((s, e) => s + e.amount, 0) + agreedDiscount;
+    y = categoryHeading(doc, y, "Refunds & Discounts", adjustments.length + (agreedDiscount > 0 ? 1 : 0), adjTotal, "success");
     brandTable(doc, {
       startY: y + 1,
       head: [["Date", "Ref #", "Type / Note", "Amount"]],
-      body: adjustments.map((a) => [
-        fmtDate(a.date), a.id,
-        [a.type === "client_refund" ? "Refund to client" : "Discount allowed", a.note].filter(Boolean).join(" — "),
-        { content: formatCurrency(a.amount), styles: { halign: "right" as const } },
-      ]),
+      body: [
+        ...(agreedDiscount > 0 ? [["—", "Booking", "Discount agreed on the booking (already deducted from payable)", { content: `- ${formatCurrency(agreedDiscount)}`, styles: { halign: "right" as const, textColor: SUCCESS } }]] : []),
+        ...adjustments.map((a) => [
+          fmtDate(a.date), a.id,
+          [a.type === "client_refund" ? "Refund to client" : "Discount allowed", a.note].filter(Boolean).join(" — "),
+          { content: `- ${formatCurrency(a.amount)}`, styles: { halign: "right" as const, textColor: SUCCESS } },
+        ]),
+      ],
     });
     y = (doc as any).lastAutoTable.finalY + 7;
   }
@@ -1636,7 +1664,7 @@ export async function generatePaymentHistory(
   let y = 44;
   y = fromAndTo(doc, y, title, ownerInfo.slice(0, 4).map(([k, v]) => [k, v] as [string, string]));
 
-  const cards: Array<[string, string, "ink" | "success" | "danger" | "gold"]> = summary.slice(0, 4).map(([l, v, c]) => [
+  const cards: Array<[string, string, "ink" | "success" | "danger" | "gold"]> = summary.slice(0, 5).map(([l, v, c]) => [
     l, v,
     (c === "success" ? "success" : c === "destructive" ? "danger" : c === "gold" ? "gold" : "ink"),
   ]);
@@ -1645,17 +1673,18 @@ export async function generatePaymentHistory(
 
   y = sectionTitle(doc, "Transaction History", y); y += 4;
   let running = 0;
+  const signed = (e: LedgerEntry) => (e.type === "client_refund" || e.type === "supplier_refund" ? -e.amount : e.amount);
   brandTable(doc, {
     startY: y + 1,
-    head: [["Date", "Receipt", "Description", "Type", "Amount", "Running"]],
-    body: entries.map((e) => {
-      running += e.amount;
+    head: [["Date", "Ref #", "Description", "Type", "Amount", "Running"]],
+    body: entries.length ? entries.map((e) => {
+      running += signed(e);
       return [
         fmtDate(e.date), e.id, e.note || e.referenceName, labelType(e.type),
-        { content: formatCurrency(e.amount), styles: { halign: "right" as const } },
+        { content: `${signed(e) < 0 ? "- " : ""}${formatCurrency(e.amount)}`, styles: { halign: "right" as const, textColor: signed(e) < 0 ? DANGER : INK } },
         { content: formatCurrency(running), styles: { halign: "right" as const, textColor: NAVY } },
       ];
-    }),
+    }) : [[{ content: "No payments have been recorded yet.", colSpan: 6, styles: { halign: "center" as const, textColor: MUTED, fontStyle: "italic" as const } }]],
   });
 
   footer(doc);
@@ -1672,9 +1701,9 @@ export async function generateInvoice(booking: Booking, clients: Client[], agent
 
   let y = 44;
   y = fromAndTo(doc, y, "Bill To", [
-    ["Head ID", booking.headId],
-    ["Lead", clients[0] ? getClientName(clients[0]) : "—"],
+    ["Head", idName(booking.headId, clients[0] ? getClientName(clients[0]) : "")],
     ["Phone", clients[0]?.phone || "—"],
+    ["Package", booking.packageType || "—"],
     ["Members", String(booking.members || clients.length)],
   ]);
 
@@ -1687,54 +1716,72 @@ export async function generateInvoice(booking: Booking, clients: Client[], agent
   doc.text(`Invoice #INV-${booking.headId.replace("AV-HD-", "")}   ·   Package: ${booking.packageType}`, 18, y + 5);
   doc.text(`Travel: ${fmtDate(booking.travelDate)}`, 192, y + 5, { align: "right" });
   doc.setTextColor(...INK);
-  y += 11;
+  y += 17;
 
   y = sectionTitle(doc, "Client Breakdown", y); y += 4;
+  const dueSum = clients.reduce((t, c) => t + (c.amountDue || 0), 0);
+  const paidSum = clients.reduce((t, c) => t + (c.amountPaid || 0), 0);
   brandTable(doc, {
     startY: y + 1,
-    head: [["#", "Client ID", "Name", "Passport", "Due", "Paid", "Status"]],
+    head: [["#", "Client", "Passport", "Due", "Paid", "Status"]],
     body: clients.map((c, i) => [
-      String(i + 1), c.id, getClientName(c), c.passport || "—",
+      String(i + 1), idName(c.id, getClientName(c)), c.passport || "—",
       { content: formatCurrency(c.amountDue), styles: { halign: "right" as const } },
       { content: formatCurrency(c.amountPaid), styles: { halign: "right" as const, textColor: SUCCESS } },
       c.paymentStatus,
     ]),
+    foot: [[
+      { content: "Total (members)", colSpan: 3, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
+      { content: formatCurrency(dueSum), styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
+      { content: formatCurrency(paidSum), styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: SUCCESS } },
+      { content: "", styles: { fillColor: ROW_ALT } },
+    ]],
   });
   y = (doc as any).lastAutoTable.finalY + 6;
 
   // Service sections embedded in invoice if any
   y = renderServiceSections(doc, y, [booking]);
 
-  const balance = booking.totalAmount - booking.amountReceived;
-  // Right-aligned totals box
+  const t = bookingTotals(booking);
+  const balance = t.pending;
+  // Totals: Package & services, discounts, net payable, received, balance due. Net = gross - reductions.
+  const rows: Array<[string, string, readonly [number, number, number]]> = [["Package & Services", formatCurrency(t.gross), INK]];
+  if (t.reductions > 0) rows.push(["Less: Discount & Adjustments", `- ${formatCurrency(t.reductions)}`, DANGER]);
+  rows.push(["Net Payable", formatCurrency(t.net), NAVY], ["Received", formatCurrency(booking.amountReceived || 0), SUCCESS]);
+  const boxH = 7 + rows.length * 7 + 14;
+  y = ensureSpace(doc, y, boxH + 10);
   doc.setFillColor(...IVORY);
-  doc.rect(110, y, 86, 32, "F");
+  doc.rect(110, y, 86, boxH, "F");
   doc.setDrawColor(...GOLD);
   doc.setLineWidth(0.4);
-  doc.rect(110, y, 86, 32);
+  doc.rect(110, y, 86, boxH);
   setSans(doc, "normal");
   doc.setFontSize(9);
-  doc.setTextColor(...INK);
-  doc.text("Total Amount", 114, y + 7);
-  doc.text(formatCurrency(booking.totalAmount), 192, y + 7, { align: "right" });
-  doc.text("Received", 114, y + 14);
-  doc.setTextColor(...SUCCESS);
-  doc.text(formatCurrency(booking.amountReceived), 192, y + 14, { align: "right" });
+  rows.forEach(([label, value, color], i) => {
+    const ry = y + 7 + i * 7;
+    const strong = label === "Net Payable";
+    setSans(doc, strong ? "bold" : "normal");
+    doc.setTextColor(...INK);
+    doc.text(label, 114, ry);
+    doc.setTextColor(...color);
+    doc.text(value, 192, ry, { align: "right" });
+  });
   doc.setTextColor(...INK);
 
+  const by = y + boxH - 13;
   doc.setFillColor(...GOLD);
-  doc.rect(110, y + 19, 86, 13, "F");
+  doc.rect(110, by, 86, 13, "F");
   doc.setTextColor(...WHITE);
   setSerif(doc, "bold");
   doc.setFontSize(11);
-  doc.text("BALANCE DUE", 114, y + 27.5);
-  doc.text(formatCurrency(balance), 192, y + 27.5, { align: "right" });
+  doc.text("BALANCE DUE", 114, by + 8.5);
+  doc.text(formatCurrency(balance), 192, by + 8.5, { align: "right" });
 
   if (agent || supplier) {
     setSans(doc, "italic");
     doc.setFontSize(7.5);
     doc.setTextColor(...MUTED);
-    doc.text(`Agent: ${agent?.name || "Direct"}   ·   Supplier: ${supplier?.companyName || "—"}`, 14, y + 36);
+    doc.text(`Agent: ${agent ? idName(agent.id, agent.name) : "Direct"}   ·   Supplier: ${supplier ? idName(supplier.id, supplier.companyName) : "—"}`, 14, y + 8, { maxWidth: 92 });
   }
 
   footer(doc);

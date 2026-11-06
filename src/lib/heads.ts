@@ -1,5 +1,5 @@
 // Head / Group business economics — single source of truth for the Head Business View card.
-import { getClientName, type Booking, type Client } from "./data";
+import { cleanName, computeBookingFinancials, getClientName, type Booking, type Client } from "./data";
 import type { LedgerEntry } from "./store";
 
 /** Head name = the lead (first) member of a Head ID, the same convention used by the Business View and statements. */
@@ -26,6 +26,8 @@ export interface HeadBusiness {
   otherCosts: number;
   totalSale: number;
   refunds: number;
+  /** Client discounts (booking discount + discount entries) taken off the sale. */
+  discounts: number;
   netReceivable: number;
   totalPurchase: number;
   commission: number;
@@ -52,13 +54,16 @@ export function computeHeadBusiness(
   const otherCosts = linked.filter((e) => e.type === "client_charge").reduce((s, e) => s + e.amount, 0);
   const base = booking?.baseAmount ?? booking?.totalAmount ?? members.reduce((s, c) => s + (c.baseDue ?? c.amountDue), 0);
   const perPerson = members.length ? Math.round(base / members.length) : base;
-  const totalSale = perPerson * (members.length || 1) + otherCosts;
+  const totalSale = base + otherCosts;
   const refunds = linked.filter((e) => e.type === "client_refund").reduce((s, e) => s + e.amount, 0);
-  const netReceivable = totalSale - refunds;
+  // Client discounts: the one agreed on the booking plus any "Client Discount" entries. They reduce what the client owes.
+  const discounts = (Number(booking?.discount) || 0) + linked.filter((e) => e.type === "client_discount").reduce((s, e) => s + e.amount, 0);
+  const netReceivable = Math.max(0, totalSale - refunds - discounts);
   const purchaseEntries = linked.filter((e) => e.type === "purchase");
   const supplierRefunds = linked.filter((e) => e.type === "supplier_refund").reduce((s, e) => s + e.amount, 0);
   const totalPurchase = Math.max(purchaseEntries.reduce((s, e) => s + e.amount, 0), booking?.totalCost || 0) - supplierRefunds;
-  const commission = booking?.commission || 0;
+  // Commission after any discount the agent absorbed out of it (same rule as the booking profit and agent ledger).
+  const commission = booking ? computeBookingFinancials(booking).netCommission : 0;
   const received = linked.filter((e) => e.type === "client_receive").reduce((s, e) => s + e.amount, 0);
 
   // ---- Supplier Paid / Remaining for THIS head's purchases only ----
@@ -83,7 +88,7 @@ export function computeHeadBusiness(
   // including any Shared Cost Allocation posted from a Purchase entry). We simply expose them.
   const memberList: HeadBusinessMember[] = members.map((c) => ({
     id: c.id,
-    name: `${c.firstName} ${c.lastName}`.trim(),
+    name: cleanName(`${c.firstName} ${c.lastName}`),
     ageCategory: c.ageCategory,
     amount: c.amountDue,
     received: c.amountPaid,
@@ -94,12 +99,13 @@ export function computeHeadBusiness(
   const lead = members[0];
   return {
     headId,
-    leadName: lead ? `${lead.firstName} ${lead.lastName}`.trim() : headId,
+    leadName: lead ? cleanName(`${lead.firstName} ${lead.lastName}`) : headId,
     members: members.length,
     perPerson,
     otherCosts,
     totalSale,
     refunds,
+    discounts,
     netReceivable,
     totalPurchase,
     commission,

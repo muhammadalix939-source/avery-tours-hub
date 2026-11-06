@@ -40,6 +40,7 @@ export default function HeadBusinessCard({ headId, open, onOpenChange }: { headI
           <div className="my-2 border-t border-border/60" />
           <Row label="Total Sale Amount" value={hb.totalSale} />
           <Row label="(–) Refunds" value={hb.refunds} sign="–" />
+          {hb.discounts > 0 && <Row label="(–) Client Discount" value={hb.discounts} sign="–" />}
           <Row label="= Net Receivable" value={hb.netReceivable} />
           <div className="my-2 border-t border-border/60" />
           <Row label="Total Purchase (Cost)" value={hb.totalPurchase} />

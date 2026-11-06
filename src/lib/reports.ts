@@ -1,4 +1,4 @@
-import type { Booking, Agent, Supplier, Client } from "./data";
+import { computeBookingFinancials, type Booking, type Agent, type Supplier, type Client } from "./data";
 import type { LedgerEntry, OpeningBalances } from "./store";
 
 export interface ReportInput {
@@ -114,7 +114,7 @@ export function profitByPackage(input: ReportInput): PackageRow[] {
     const purchases = entries.filter(e => e.type === "purchase" && e.headId === b.headId).reduce((s, e) => s + e.amount, 0);
     const cost = purchases > 0 ? purchases : (b.totalCost || 0);
     const revenue = b.totalAmount || 0;
-    const profit = revenue - cost - (b.commission || 0);
+    const profit = revenue - cost - computeBookingFinancials(b).netCommission;
     const cur = map.get(key) || { packageType: key, bookings: 0, revenue: 0, cost: 0, profit: 0, margin: 0, avgProfit: 0 };
     cur.bookings += 1;
     cur.revenue += revenue;
@@ -179,7 +179,7 @@ export function topProfitableBookings(input: ReportInput, n = 5) {
   return bookings.map(b => {
     const purchases = entries.filter(e => e.type === "purchase" && e.headId === b.headId).reduce((s, e) => s + e.amount, 0);
     const cost = purchases > 0 ? purchases : (b.totalCost || 0);
-    const profit = (b.totalAmount || 0) - cost - (b.commission || 0);
+    const profit = (b.totalAmount || 0) - cost - computeBookingFinancials(b).netCommission;
     return { ...b, _cost: cost, _profit: profit };
   }).sort((a, b) => b._profit - a._profit).slice(0, n);
 }

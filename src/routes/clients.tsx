@@ -47,7 +47,10 @@ function ClientsPage() {
   };
 
   function handleAdd() {
-    store.addClient({
+    // A client added to a Head that already has a booking is a new traveller on that booking:
+    // their amount must be added to the booking total.
+    const attach = store.bookings.some((b) => b.headId === form.headId) ? store.addMemberToBooking : store.addClient;
+    attach({
       headId: form.headId, firstName: form.firstName, lastName: form.lastName,
       gender: form.gender, nationality: form.nationality, passport: form.passport,
       cnic: form.cnic, dateOfBirth: form.dateOfBirth, dateOfIssue: form.dateOfIssue,
@@ -69,7 +72,7 @@ function ClientsPage() {
       dateOfExpire: form.dateOfExpire, phone: form.phone, email: form.email,
       packageType: form.packageType, amountDue: Number(form.amountDue) || 0,
       isVip: form.isVip, destination: form.destination, driveLink: form.driveLink,
-    });
+    }, { adjustBooking: true });
     setEditOpen(false);
   }
 
@@ -221,7 +224,7 @@ function ClientsPage() {
         onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}
         title={`Delete ${deleteTarget ? getClientName(deleteTarget) : "client"}?`}
         description="This client record, along with their service checklist, will be permanently removed."
-        onConfirm={() => { if (deleteTarget) store.deleteClient(deleteTarget.id); setDeleteTarget(null); }}
+        onConfirm={() => { if (deleteTarget) store.deleteClient(deleteTarget.id, { adjustBooking: true }); setDeleteTarget(null); }}
       />
 
       <DetailDialog open={detailOpen} onOpenChange={setDetailOpen} type="client" data={selected} entries={relatedEntries} allClients={store.clients} allBookings={store.bookings} />

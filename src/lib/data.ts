@@ -82,8 +82,17 @@ export interface Client {
   checklistArchived?: boolean;
 }
 
+/** One identity string used on screens and PDFs: ID first, then the name ("AV-S001 — Al-Haram Hotels"). */
+export const idName = (id: string | undefined, name: string | undefined | null): string =>
+  [id, String(name ?? "").replace(/\s+/g, " ").trim()].filter(Boolean).join(" — ") || "—";
+
+/** Collapse stray double spaces typed in names ("Muhammad  Asif" -> "Muhammad Asif"). */
+export function cleanName(s: string | undefined | null): string {
+  return String(s ?? "").replace(/\s+/g, " ").trim();
+}
+
 export function getClientName(c: Client): string {
-  return `${c.firstName} ${c.lastName}`.trim() || "—";
+  return cleanName(`${c.firstName} ${c.lastName}`) || "—";
 }
 
 export interface Booking {
@@ -148,6 +157,7 @@ export interface BookingFinancials {
 }
 
 export function computeBookingFinancials(b: Booking): BookingFinancials {
+  // totalAmount is the NET amount the customer owes (the client discount is already taken off by the store).
   const sale = Number(b.totalAmount) || 0;
   const discount = Number(b.discount) || 0;
   const supplierDisc = Number(b.supplierDiscount) || 0;
@@ -168,13 +178,14 @@ export function computeBookingFinancials(b: Booking): BookingFinancials {
     agencyAbsorbedDiscount = discount;
   }
 
-  // Net agency profit: Sale revenue (after agency-absorbed discount) - net supplier cost - net commission
-  const netProfit = (sale - agencyAbsorbedDiscount) - netCost - netCommission;
+  // Net agency profit: net sale (discount already off) - net supplier cost - net commission.
+  // The agent-absorbed part of the discount has reduced the commission, the rest is borne by the agency.
+  const netProfit = sale - netCost - netCommission;
   const isLoss = netProfit < 0;
 
   return {
     sale,
-    grossSale: sale,
+    grossSale: sale + discount,
     discount,
     supplierDiscount: supplierDisc,
     netCost,
@@ -186,6 +197,16 @@ export function computeBookingFinancials(b: Booking): BookingFinancials {
     lossAmount: isLoss ? Math.abs(netProfit) : 0,
     marginPercent: sale > 0 ? Math.round((netProfit / sale) * 100) : 0,
   };
+}
+
+/** Booking money in one place. `totalAmount` is the NET the customer owes; gross = package + extra charges;
+ *  reductions = discounts + refunds taken off. Always gross - reductions = net. */
+export function bookingTotals(b: Booking) {
+  const base = Number(b.baseAmount ?? b.totalAmount) || 0;
+  const extra = Number(b.extraCharges) || 0;
+  const net = Number(b.totalAmount) || 0;
+  const gross = base + extra;
+  return { base, extra, gross, net, reductions: Math.max(0, gross - net), pending: Math.max(0, net - (Number(b.amountReceived) || 0)) };
 }
 
 export function computeBookingProfit(b: Booking): number {

@@ -42,7 +42,8 @@ export default function BookingViewDialog({ headId, onClose }: { headId: string 
         <DialogHeader>
           <DialogTitle className="flex flex-wrap items-baseline gap-2">
             <span className="text-primary">{headId}</span>
-            <span className="text-sm font-normal text-muted-foreground">{hb.leadName} · {booking?.packageType} · {booking?.travelDate} · {agent ? `Agent: ${agent.name}` : "Direct"}</span>
+            <span className="font-semibold">{hb.leadName}</span>
+            <span className="text-sm font-normal text-muted-foreground">{booking?.packageType} · {booking?.travelDate} · {agent ? `Agent: ${agent.name}` : "Direct"}</span>
           </DialogTitle>
         </DialogHeader>
 
@@ -52,6 +53,14 @@ export default function BookingViewDialog({ headId, onClose }: { headId: string 
           <Kpi label="Remaining" value={formatCurrency(hb.outstanding)} tone="text-destructive" />
           <Kpi label="Net Profit" value={formatCurrency(profit)} tone={profit >= 0 ? "text-success" : "text-destructive"} />
         </div>
+        {(hb.discounts > 0 || hb.refunds > 0 || hb.otherCosts > 0) && (
+          <p className="-mt-1 text-[11px] text-muted-foreground">
+            Package + charges {formatCurrency(hb.totalSale)}
+            {hb.discounts > 0 && <> · <span className="text-amber-400">Discount − {formatCurrency(hb.discounts)}</span></>}
+            {hb.refunds > 0 && <> · Refunds − {formatCurrency(hb.refunds)}</>}
+            {" "}= <span className="font-semibold text-foreground">Net {formatCurrency(hb.netReceivable)}</span>
+          </p>
+        )}
 
         <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-accent/10 p-1">
           {(["members", "business"] as const).map((t) => (
@@ -108,6 +117,7 @@ export default function BookingViewDialog({ headId, onClose }: { headId: string 
               <Line label={`Sale (${hb.members} × ${formatCurrency(hb.perPerson)})`} value={hb.totalSale - hb.otherCosts} />
               {hb.otherCosts > 0 && <Line label="Extra charges" value={hb.otherCosts} sign="+ " />}
               {hb.refunds > 0 && <Line label="Client refunds" value={hb.refunds} sign="− " />}
+              {hb.discounts > 0 && <Line label="Client discount" value={hb.discounts} sign="− " tone="text-warning" />}
               <Line label="Net Sale" value={hb.netReceivable} strong />
               <Line label="Supplier purchases" value={hb.totalPurchase} sign="− " tone="text-warning" />
               <Line label={`Agent commission${agent ? ` (${agent.name})` : ""}`} value={hb.commission} sign="− " tone="text-warning" />

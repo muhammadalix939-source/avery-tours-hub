@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Download, ChevronRight, ArrowLeft, Users, DollarSign, FileText } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import ClientChecklistPanel from "@/components/ClientChecklistPanel";
-import { formatCurrency, getClientName } from "@/lib/data";
+import { bookingTotals, computeBookingFinancials, formatCurrency, getClientName, idName } from "@/lib/data";
 import type { Client, Booking, Agent, Supplier } from "@/lib/data";
 import type { LedgerEntry } from "@/lib/store";
 import { generateClientStatement, generateSupplierLedger, generateAgentReport, generatePaymentHistory } from "@/lib/pdf";
@@ -44,7 +44,7 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
     if (type === "client") {
       const c = data as Client;
       generatePaymentHistory(`Client ${c.id}`,
-        [["Client ID", c.id], ["Name", getClientName(c)], ["Head ID", c.headId], ["Phone", c.phone]],
+        [["Client", idName(c.id, getClientName(c))], ["Head ID", c.headId], ["Phone", c.phone]],
         entries.filter((e) => e.type === "client_receive"),
         [["Total Due", fc(c.amountDue), "ink"], ["Paid", fc(c.amountPaid), "success"], ["Remaining", fc(c.amountDue - c.amountPaid), "destructive"]]);
     }
@@ -53,14 +53,14 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
       const payable = s.totalPayable + (s.openingPayable || 0);
       const paid = s.totalPaid + (s.openingPaid || 0);
       generatePaymentHistory(`Supplier ${s.id}`,
-        [["Supplier ID", s.id], ["Company", s.companyName], ["Contact", s.contactPerson]],
+        [["Supplier", idName(s.id, s.companyName)], ["Contact", s.contactPerson]],
         entries.filter((e) => e.type === "supplier_payment"),
         [["Payable", fc(payable), "ink"], ["Paid", fc(paid), "success"], ["Remaining", fc(payable - paid), "destructive"]]);
     }
     if (type === "agent") {
       const a = data as Agent;
       generatePaymentHistory(`Agent ${a.id}`,
-        [["Agent ID", a.id], ["Name", a.name], ["Phone", a.phone]],
+        [["Agent", idName(a.id, a.name)], ["Phone", a.phone]],
         entries.filter((e) => e.type === "agent_commission" && e.referenceId === a.id),
         [["Commission", fc(a.commission), "ink"], ["Paid", fc(a.paidCommission || 0), "success"], ["Payable", fc((a.commission || 0) - (a.paidCommission || 0)), "destructive"]]);
     }
@@ -146,7 +146,7 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
               )}
               {type === "agent" && renderAgentFull(data as Agent, getAgentStats(data as Agent), () => setSubView("clients"), () => setSubView("business"), () => setSubView("othersale"))}
               {type === "supplier" && renderSupplierFull(data as Supplier, getSupplierStats(data as Supplier), () => setSubView("bookings"))}
-              {type === "booking" && renderBooking(data as Booking)}
+              {type === "booking" && renderBooking(data as Booking, (() => { const lead = allClients?.find((c) => c.headId === (data as Booking).headId); return lead ? getClientName(lead) : ""; })())}
 
               {entries.length > 0 && type === "agent" && (
                 <>
@@ -267,7 +267,7 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
                 <div className="rounded-lg border border-border/50 p-3 space-y-2">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Booking-wise Receivable</p>
                   {stats.agentBookings.map((b: any) => {
-                    const net = Math.max(0, (b.totalAmount || 0) - (b.commission || 0));
+                    const net = Math.max(0, (b.totalAmount || 0) - computeBookingFinancials(b).netCommission);
                     return (
                       <div key={b.id} className="flex items-center justify-between rounded bg-accent/20 px-3 py-2">
                         <div>
@@ -505,19 +505,22 @@ function renderSupplierFull(s: Supplier, stats: { supplierBookings: any[]; total
   );
 }
 
-function renderBooking(b: Booking) {
+function renderBooking(b: Booking, headName = "") {
+  const t = bookingTotals(b);
   return (
     <>
       <Row label="Booking ID" value={b.id} />
-      <Row label="Head ID" value={b.headId} />
+      <Row label="Head" value={idName(b.headId, headName)} />
       <Row label="Package" value={b.packageType} />
       <Row label="Agent" value={b.agentId || "Direct"} />
       <Row label="Supplier" value={b.supplierId} />
       {b.destination && <Row label="Destination" value={b.destination} />}
       <Row label="Members" value={String(b.members || b.clientIds.length)} />
-      <Row label="Total Amount" value={formatCurrency(b.totalAmount)} />
+      <Row label="Package & Services" value={formatCurrency(t.gross)} />
+      {t.reductions > 0 && <Row label="Less: Discount & Adjustments" value={`- ${formatCurrency(t.reductions)}`} color="text-destructive" />}
+      <Row label="Net Payable" value={formatCurrency(t.net)} />
       <Row label="Received" value={formatCurrency(b.amountReceived)} color="text-success" />
-      <Row label="Pending" value={formatCurrency(b.totalAmount - b.amountReceived)} color="text-destructive" />
+      <Row label="Pending" value={formatCurrency(t.pending)} color="text-destructive" />
       <Row label="Total Cost" value={formatCurrency(b.totalCost || 0)} />
       <Row label="Commission" value={formatCurrency(b.commission || 0)} />
       <div className="flex justify-between border-b border-border/30 py-2">

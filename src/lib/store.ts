@@ -344,6 +344,7 @@ async function loadFromCloud() {
     if (e?.length) entries = e;
     if (g?.length) groups = g;
     if (acc?.length) accounts = acc;
+    normalizeDiscountedHeads();
     resyncDerived();
     cloudSyncStatus = "synced";
     lastSyncedAt = new Date().toLocaleTimeString();
@@ -492,6 +493,7 @@ function hydrateFromStorage() {
     }
   } catch {}
   // Persisted files may carry stale derived numbers — recompute from source of truth.
+  normalizeDiscountedHeads();
   resyncDerived();
   listeners.forEach((l) => l());
 }
@@ -554,6 +556,68 @@ function resyncSuppliers() {
 /** Recompute everything that is derived. Cheap for CRM-sized data. */
 function resyncDerived() { resyncSuppliers(); resyncAgents(); }
 
+// ---------- Per-head recompute (single source of truth for booking + member dues) ----------
+const sumAmount = (list: LedgerEntry[]) => list.reduce((t, e) => t + e.amount, 0);
+
+/** What one member owes: base + extra charges - refunds - client discounts - the booking-level client
+ *  discount. Entries / discounts that name no member belong to the lead (first) member. */
+function computeMemberDue(c: Client): number {
+  const headClients = clients.filter((x) => x.headId === c.headId);
+  const isLead = headClients[0]?.id === c.id;
+  const mine = (e: LedgerEntry) => (e.clientId ? e.clientId === c.id : isLead);
+  const of = (type: LedgerEntry["type"]) => sumAmount(entries.filter((e) => e.type === type && e.headId === c.headId && mine(e)));
+  const bookingDiscount = isLead ? Number(bookings.find((b) => b.headId === c.headId)?.discount) || 0 : 0;
+  const base = c.baseDue ?? c.amountDue;
+  return Math.max(0, base + of("client_charge") - of("client_refund") - of("client_discount") - bookingDiscount);
+}
+
+/** Recompute the booking net total, every member's due and the paid split for one Head.
+ *  `received` defaults to ledger receipts (net of refunds) when they exist, else the booking's stored figure. */
+function recomputeHead(headId: string, received?: number) {
+  const refunded = sumAmount(entries.filter((e) => e.type === "client_refund" && e.headId === headId));
+  const discountTotal = sumAmount(entries.filter((e) => e.type === "client_discount" && e.headId === headId));
+  const chargeTotal = sumAmount(entries.filter((e) => e.type === "client_charge" && e.headId === headId));
+  const receipts = entries.filter((e) => e.type === "client_receive" && e.headId === headId);
+  const existing = bookings.find((b) => b.headId === headId);
+  const totalReceived = received ?? (receipts.length ? Math.max(0, sumAmount(receipts) - refunded) : Math.max(0, existing?.amountReceived || 0));
+
+  bookings = bookings.map((b) => {
+    if (b.headId !== headId) return b;
+    const base = b.baseAmount ?? b.totalAmount;
+    const bookingDiscount = Number(b.discount) || 0;
+    // totalAmount is the NET amount the customer owes (client discount already taken off).
+    return {
+      ...b, baseAmount: base, extraCharges: chargeTotal, refunded,
+      totalAmount: Math.max(0, base + chargeTotal - refunded - discountTotal - bookingDiscount),
+      amountReceived: totalReceived,
+    };
+  });
+
+  clients = clients.map((c) => {
+    if (c.headId !== headId) return c;
+    const extra = sumAmount(entries.filter((e) => e.type === "client_charge" && e.headId === headId && (e.clientId ? e.clientId === c.id : c.id === clients.find((x) => x.headId === headId)?.id)));
+    const refund = sumAmount(entries.filter((e) => e.type === "client_refund" && e.headId === headId && (e.clientId ? e.clientId === c.id : c.id === clients.find((x) => x.headId === headId)?.id)));
+    const base = c.baseDue ?? c.amountDue;
+    return { ...c, baseDue: base, extraCharges: extra, refunded: refund, amountDue: computeMemberDue({ ...c, baseDue: base }) };
+  });
+
+  let remaining = totalReceived;
+  clients = clients.map((c) => {
+    if (c.headId !== headId) return c;
+    if (c.amountDue <= 0) return { ...c, amountPaid: 0, paymentStatus: "Paid" as const };
+    if (remaining <= 0) return { ...c, amountPaid: 0, paymentStatus: "Unpaid" as const };
+    if (remaining >= c.amountDue) { remaining -= c.amountDue; return { ...c, amountPaid: c.amountDue, paymentStatus: "Paid" as const }; }
+    const paid = remaining; remaining = 0;
+    return { ...c, amountPaid: paid, paymentStatus: "Partial" as const };
+  });
+}
+
+/** Booking-level client discounts were stored on top of an un-discounted total in older data.
+ *  Re-derive the affected Heads once on load so every screen and PDF shows the net amount. */
+function normalizeDiscountedHeads() {
+  bookings.filter((b) => (Number(b.discount) || 0) > 0).forEach((b) => recomputeHead(b.headId));
+}
+
 // Recompute derived totals on suppliers / agents / bookings from the entries array.
 // Call after ANY entry add / update / delete so views and PDFs stay consistent.
 function resyncFromEntries(refIds: { supplierIds?: string[]; agentIds?: string[]; headIds?: string[] }) {
@@ -564,55 +628,7 @@ function resyncFromEntries(refIds: { supplierIds?: string[]; agentIds?: string[]
 
   // Bookings / clients: amountReceived = sum(client_receive entries for that head), redistribute to clients
   if (headIds.size) {
-    headIds.forEach((headId) => {
-      const gross = entries.filter((e) => e.type === "client_receive" && e.headId === headId).reduce((s, e) => s + e.amount, 0);
-      const refundList = entries.filter((e) => e.type === "client_refund" && e.headId === headId);
-      const refunded = refundList.reduce((s, e) => s + e.amount, 0);
-      const discountList = entries.filter((e) => e.type === "client_discount" && e.headId === headId);
-      const discountTotal = discountList.reduce((s, e) => s + e.amount, 0);
-      const charges = entries.filter((e) => e.type === "client_charge" && e.headId === headId);
-      const chargeTotal = charges.reduce((s, e) => s + e.amount, 0);
-      const totalReceived = Math.max(0, gross - refunded);
-
-      bookings = bookings.map((b) => {
-        if (b.headId !== headId) return b;
-        const base = b.baseAmount ?? b.totalAmount;
-        // A refund or discount reduces the NET sale value of the booking
-        return {
-          ...b, baseAmount: base, extraCharges: chargeTotal, refunded,
-          totalAmount: Math.max(0, base + chargeTotal - refunded - discountTotal),
-          amountReceived: totalReceived,
-        };
-      });
-
-      // Push each extra charge / refund / discount onto the member it belongs to
-      // (unassigned ones hit the head/lead member). Refunds and discounts reduce that member's net due.
-      const headClients = clients.filter((c) => c.headId === headId);
-      const leadId = headClients[0]?.id;
-      clients = clients.map((c) => {
-        if (c.headId !== headId) return c;
-        const extra = charges
-          .filter((e) => (e.clientId ? e.clientId === c.id : c.id === leadId))
-          .reduce((s, e) => s + e.amount, 0);
-        const refund = refundList
-          .filter((e) => (e.clientId ? e.clientId === c.id : c.id === leadId))
-          .reduce((s, e) => s + e.amount, 0);
-        const discount = discountList
-          .filter((e) => (e.clientId ? e.clientId === c.id : c.id === leadId))
-          .reduce((s, e) => s + e.amount, 0);
-        const base = c.baseDue ?? c.amountDue;
-        return { ...c, baseDue: base, extraCharges: extra, refunded: refund, amountDue: Math.max(0, base + extra - refund - discount) };
-      });
-
-      let remaining = totalReceived;
-      clients = clients.map((c) => {
-        if (c.headId !== headId) return c;
-        if (remaining <= 0) return { ...c, amountPaid: 0, paymentStatus: "Unpaid" as const };
-        if (remaining >= c.amountDue) { remaining -= c.amountDue; return { ...c, amountPaid: c.amountDue, paymentStatus: "Paid" as const }; }
-        const paid = remaining; remaining = 0;
-        return { ...c, amountPaid: paid, paymentStatus: "Partial" as const };
-      });
-    });
+    headIds.forEach((headId) => recomputeHead(headId));
   }
   // Booking totals may have shifted (charges / refunds) → agent sales follow.
   resyncAgents();
@@ -867,31 +883,85 @@ export function useStore() {
       registerUndoableAction(`Client ${clientName} added`, () => restoreStateSnapshot(snap));
       return id;
     },
-    updateClient: (id: string, data: Partial<Client>) => {
+    /** `adjustBooking`: when the member's package amount changes, move the booking total by the same difference
+     *  (used by member editors; the full Edit Booking screen recomputes the booking itself). */
+    updateClient: (id: string, data: Partial<Client>, opts?: { adjustBooking?: boolean }) => {
       const snap = takeStateSnapshot();
       const target = clients.find((c) => c.id === id);
+      const oldBase = target ? (target.baseDue ?? target.amountDue) : 0;
       clients = clients.map((c) => {
         if (c.id !== id) return c;
         const next = { ...c, ...data };
         if (data.amountDue !== undefined) {
           next.baseDue = data.amountDue;
-          next.amountDue = data.amountDue + (c.extraCharges || 0);
+          next.amountDue = computeMemberDue({ ...next, baseDue: data.amountDue });
         }
         return next;
       });
+      if (opts?.adjustBooking && target && data.amountDue !== undefined && data.amountDue !== oldBase) {
+        const delta = data.amountDue - oldBase;
+        bookings = bookings.map((b) => (b.headId === target.headId ? { ...b, baseAmount: (b.baseAmount ?? b.totalAmount) + delta } : b));
+      }
+      if (target && opts?.adjustBooking) recomputeHead(target.headId);
+      resyncAgents();
       notify();
       const clientName = target ? `${target.firstName} ${target.lastName}`.trim() : id;
       registerUndoableAction(`Client ${clientName} updated`, () => restoreStateSnapshot(snap));
     },
-    deleteClient: (id: string) => {
+    deleteClient: (id: string, opts?: { adjustBooking?: boolean }) => {
       const snap = takeStateSnapshot();
       const target = clients.find((c) => c.id === id);
       clients = clients.filter((c) => c.id !== id);
       bookings = bookings.map((b) => ({ ...b, clientIds: b.clientIds.filter((cid) => cid !== id) }));
+      if (opts?.adjustBooking && target) {
+        const gone = target.baseDue ?? target.amountDue;
+        bookings = bookings.map((b) => (b.headId === target.headId ? { ...b, baseAmount: Math.max(0, (b.baseAmount ?? b.totalAmount) - gone), members: Math.max(0, (b.members || b.clientIds.length + 1) - 1) } : b));
+        recomputeHead(target.headId);
+      }
       resyncAgents();
       notify();
       const clientName = target ? `${target.firstName} ${target.lastName}`.trim() : id;
       registerUndoableAction(`Client ${clientName} deleted`, () => restoreStateSnapshot(snap));
+    },
+
+    /** Add a traveller to an existing booking: the member's package amount is added to the booking total,
+     *  any amount paid at the counter is recorded as a receipt, and dues/payments are re-split. One Undo. */
+    addMemberToBooking: (data: Omit<Client, "id">, paidNow = 0): string => {
+      const snap = takeStateSnapshot();
+      const id = generateId("AV-C", nextClientNum++);
+      const due = Math.max(0, Number(data.amountDue) || 0);
+      clients = [...clients, { ...data, id, baseDue: due, amountDue: due, amountPaid: 0, extraCharges: 0 }];
+      bookings = bookings.map((b) => (b.headId === data.headId
+        ? { ...b, clientIds: [...b.clientIds, id], members: (b.members || b.clientIds.length) + 1, baseAmount: (b.baseAmount ?? b.totalAmount) + due }
+        : b));
+      if (paidNow > 0) {
+        const eid = `E${String(nextEntryNum++).padStart(3, "0")}`;
+        entries = [...entries, {
+          id: eid, date: getPKTDate(), type: "client_receive", headId: data.headId,
+          referenceId: data.headId, referenceName: `Booking ${data.headId}`,
+          amount: paidNow, note: `Paid at member add (${`${data.firstName} ${data.lastName}`.trim() || id})`,
+          createdAt: new Date().toLocaleString("en-PK", { timeZone: "Asia/Karachi" }),
+        }];
+      }
+      recomputeHead(data.headId);
+      resyncDerived();
+      notify();
+      const name = `${data.firstName || ""} ${data.lastName || ""}`.trim() || id;
+      registerUndoableAction(`${name} added to ${data.headId} — booking total updated`, () => restoreStateSnapshot(snap));
+      return id;
+    },
+    /** Re-derive booking total, member dues and the paid split of one Head (after any member / discount change). */
+    recomputeHead: (headId: string) => { recomputeHead(headId); resyncAgents(); notify(); },
+    /** Make the booking's base total equal the sum of its members' package amounts (fixes old data where a member was added without updating the total). */
+    syncBookingToMembers: (headId: string) => {
+      const snap = takeStateSnapshot();
+      const members = clients.filter((c) => c.headId === headId);
+      const sum = members.reduce((t, c) => t + (c.baseDue ?? c.amountDue), 0);
+      bookings = bookings.map((b) => (b.headId === headId ? { ...b, baseAmount: sum, members: members.length, clientIds: members.map((c) => c.id) } : b));
+      recomputeHead(headId);
+      resyncDerived();
+      notify();
+      registerUndoableAction(`Booking ${headId} total synced to its members`, () => restoreStateSnapshot(snap));
     },
 
     // ---- Service Checklist CRUD (per client) ----
@@ -974,7 +1044,8 @@ export function useStore() {
     addBooking: (data: Omit<Booking, "id">) => {
       const snap = takeStateSnapshot();
       const id = `B${String(nextBookingNum++).padStart(3, "0")}`;
-      bookings = [...bookings, { ...data, id, baseAmount: data.totalAmount, extraCharges: 0 }];
+      // totalAmount = NET amount the customer owes; the client discount is taken off here and baseAmount keeps the gross.
+      bookings = [...bookings, { ...data, id, baseAmount: data.totalAmount, extraCharges: 0, totalAmount: Math.max(0, data.totalAmount - (Number(data.discount) || 0)) }];
       resyncDerived();
       notify();
       registerUndoableAction(`Booking ${id} (${data.packageType || "Custom"}) created`, () => restoreStateSnapshot(snap));
@@ -986,45 +1057,33 @@ export function useStore() {
       bookings = bookings.map((b) => {
         if (b.id !== id) return b;
         const next = { ...b, ...data };
-        if (data.totalAmount !== undefined) {
-          next.baseAmount = data.totalAmount;
-          next.totalAmount = data.totalAmount + (b.extraCharges || 0);
+        if (data.totalAmount !== undefined) next.baseAmount = data.totalAmount;
+        if (data.totalAmount !== undefined || data.discount !== undefined) {
+          const discEntries = sumAmount(entries.filter((e) => e.type === "client_discount" && e.headId === b.headId));
+          next.totalAmount = Math.max(0, (next.baseAmount ?? next.totalAmount) + (next.extraCharges || 0) - (next.refunded || 0) - discEntries - (Number(next.discount) || 0));
         }
         return next;
       });
       const after = bookings.find((b) => b.id === id);
       // Auto-sync deltas to agent / supplier when totals change
       if (before && after) {
-        // ---- Sync clients when totalAmount or amountReceived changes ----
-        const headClients = clients.filter((c) => c.headId === after.headId);
-        const totalChanged = (before.totalAmount || 0) !== (after.totalAmount || 0);
+        // ---- Keep the receipts ledger in step when the received figure is edited ----
         const receivedChanged = (before.amountReceived || 0) !== (after.amountReceived || 0);
-        if ((totalChanged || receivedChanged) && headClients.length > 0) {
-          const perPerson = Math.round((after.totalAmount || 0) / headClients.length);
-          let remaining = after.amountReceived || 0;
-          clients = clients.map((c) => {
-            if (c.headId !== after.headId) return c;
-            const due = totalChanged ? perPerson : c.amountDue;
-            if (remaining <= 0) return { ...c, amountDue: due, amountPaid: 0, paymentStatus: "Unpaid" as const };
-            if (remaining >= due) { remaining -= due; return { ...c, amountDue: due, amountPaid: due, paymentStatus: "Paid" as const }; }
-            const paid = remaining; remaining = 0;
-            return { ...c, amountDue: due, amountPaid: paid, paymentStatus: "Partial" as const };
-          });
-          // Sync a client_receive ledger entry so totals reconcile
-          if (receivedChanged) {
-            const existingReceived = entries.filter((e) => e.type === "client_receive" && e.headId === after.headId).reduce((s, e) => s + e.amount, 0);
-            const delta = (after.amountReceived || 0) - existingReceived;
-            if (delta !== 0) {
-              const eid = `E${String(nextEntryNum++).padStart(3, "0")}`;
-              entries = [...entries, {
-                id: eid, date: getPKTDate(), type: "client_receive", headId: after.headId,
-                referenceId: after.headId, referenceName: `Booking ${after.headId}`,
-                amount: delta, note: `Adjustment from booking edit`,
-                createdAt: new Date().toLocaleString("en-PK", { timeZone: "Asia/Karachi" }),
-              }];
-            }
+        if (receivedChanged) {
+          const existingReceived = entries.filter((e) => e.type === "client_receive" && e.headId === after.headId).reduce((s2, e) => s2 + e.amount, 0);
+          const delta = (after.amountReceived || 0) - existingReceived;
+          if (delta !== 0) {
+            const eid = `E${String(nextEntryNum++).padStart(3, "0")}`;
+            entries = [...entries, {
+              id: eid, date: getPKTDate(), type: "client_receive", headId: after.headId,
+              referenceId: after.headId, referenceName: `Booking ${after.headId}`,
+              amount: delta, note: `Adjustment from booking edit`,
+              createdAt: new Date().toLocaleString("en-PK", { timeZone: "Asia/Karachi" }),
+            }];
           }
         }
+        // Net total, member dues (lead carries the booking discount) and paid split
+        recomputeHead(after.headId, after.amountReceived || 0);
       }
       // Agents & suppliers are fully derived from bookings + ledger
       resyncDerived();

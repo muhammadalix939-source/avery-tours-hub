@@ -16,7 +16,8 @@ import { sortEntities, type SortOptionKey } from "@/lib/sort-utils";
 import { formatCurrency, getClientName, PACKAGE_TYPES, computeBookingProfit, computeBookingFinancials, type Booking, type Client } from "@/lib/data";
 import { useStore } from "@/lib/store";
 import { getHeadName } from "@/lib/heads";
-import { computeGroupUsedPax } from "@/lib/store";
+import { bookingTotals, idName } from "@/lib/data";
+import { computeGroupUsedPax, type LedgerEntry } from "@/lib/store";
 import { getPKTDate } from "@/lib/date-utils";
 import { generateInvoice, generatePaymentHistory } from "@/lib/pdf";
 import { useState, useMemo } from "react";
@@ -302,6 +303,9 @@ function BookingsPage() {
       }
     }
 
+    // Net total (client discount off), member dues and paid split for the new Head
+    store.recomputeHead(headId);
+
     resetForm();
     setAddOpen(false);
   }
@@ -395,6 +399,8 @@ function BookingsPage() {
         packageType: form.packageType, destination: form.destination,
       });
     });
+    // Lead member carries the client discount; payments are re-split over the final dues
+    store.recomputeHead(headId);
     setEditOpen(false);
   }
 
@@ -435,16 +441,26 @@ function BookingsPage() {
   }
 
   function downloadPaymentHistory(b: Booking) {
-    const related = store.entries.filter((e) => e.headId === b.headId && e.type === "client_receive");
-    const totalReceived = related.reduce((s, e) => s + e.amount, 0);
+    const t = bookingTotals(b);
+    const lines = store.entries
+      .filter((e) => e.headId === b.headId && (e.type === "client_receive" || e.type === "client_refund"))
+      .sort((x, y) => x.date.localeCompare(y.date));
+    // Money recorded on the booking itself (before the ledger was used) shows as its own first row.
+    const ledgerNet = lines.reduce((s2, e) => s2 + (e.type === "client_refund" ? -e.amount : e.amount), 0);
+    const opening = Math.max(0, (b.amountReceived || 0) - ledgerNet);
+    const rows = opening > 0
+      ? [{ id: "OPENING", date: (b.createdAt || b.travelDate || "").slice(0, 10), type: "client_receive", headId: b.headId, referenceId: b.headId, referenceName: `Booking ${b.headId}`, amount: opening, note: "Received at booking", createdAt: "" } as LedgerEntry, ...lines]
+      : lines;
     generatePaymentHistory(
       `Booking ${b.headId}`,
-      [["Head ID", b.headId], ["Package", b.packageType], ["Travel Date", b.travelDate], ["Members", String(b.members)]],
-      related,
+      [["Head", idName(b.headId, getHeadName(b.headId, store.clients))], ["Package", b.packageType], ["Travel Date", b.travelDate], ["Members", String(b.members)]],
+      rows,
       [
-        ["Total Amount", formatCurrency(b.totalAmount), "ink"],
-        ["Received", formatCurrency(totalReceived), "success"],
-        ["Pending", formatCurrency(b.totalAmount - totalReceived), "destructive"],
+        ["Package & Services", formatCurrency(t.gross), "ink"],
+        ["Discount & Adjust.", t.reductions > 0 ? `- ${formatCurrency(t.reductions)}` : formatCurrency(0), t.reductions > 0 ? "destructive" : "ink"],
+        ["Net Payable", formatCurrency(t.net), "gold"],
+        ["Received", formatCurrency(b.amountReceived || 0), "success"],
+        ["Pending", formatCurrency(t.pending), "destructive"],
       ]
     );
   }
@@ -1018,11 +1034,32 @@ function BookingsPage() {
                     <td className="px-3 py-3">
                       <div className="font-semibold text-primary">{b.headId}</div>
                       <div className="max-w-[180px] truncate text-xs text-foreground/80" title={getHeadName(b.headId, store.clients)}>{getHeadName(b.headId, store.clients)}</div>
+                      {(() => {
+                        // Old data: a member was added but the booking total was never increased.
+                        const sum = clients.reduce((t, c) => t + (c.baseDue ?? c.amountDue), 0);
+                        const base = b.baseAmount ?? b.totalAmount;
+                        if (!clients.length || Math.abs(sum - base) <= Math.max(1, clients.length)) return null;
+                        return (
+                          <button
+                            type="button"
+                            title={`Members add up to ${formatCurrency(sum)} but the booking total is ${formatCurrency(base)}`}
+                            onClick={() => { store.syncBookingToMembers(b.headId); }}
+                            className="mt-1 whitespace-nowrap rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-400 hover:bg-amber-500/20"
+                          >
+                            Total ≠ members · Sync {formatCurrency(sum)}
+                          </button>
+                        );
+                      })()}
                     </td>
                     <td className="px-3 py-3">{b.packageType}</td>
                     <td className="px-3 py-3">{clients.length}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-muted-foreground">{b.agentId || "Direct"}</td>
-                    <td className="whitespace-nowrap px-3 py-3 font-mono">{formatCurrency(b.totalAmount)}</td>
+                    <td className="whitespace-nowrap px-3 py-3 font-mono">
+                      <div>{formatCurrency(b.totalAmount)}</div>
+                      {bookingTotals(b).reductions > 0 && (
+                        <div className="text-[10px] text-muted-foreground">Gross {formatCurrency(bookingTotals(b).gross)} − {formatCurrency(bookingTotals(b).reductions)}</div>
+                      )}
+                    </td>
                     <td className="whitespace-nowrap px-3 py-3 text-success font-mono">{formatCurrency(b.amountReceived)}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-destructive font-mono">{formatCurrency(pending)}</td>
                     <td className="px-3 py-3">
@@ -1292,7 +1329,11 @@ function BookingsPage() {
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div><Label className="text-[10px]">Amount Due</Label><Input type="number" value={memberEdit.amountDue} onChange={(e) => setMemberEdit({ ...memberEdit, amountDue: Number(e.target.value) || 0 })} className="bg-accent/20 border-border mt-0.5 h-8 text-xs" /></div>
-                <div><Label className="text-[10px]">Amount Paid</Label><Input type="number" value={memberEdit.amountPaid} onChange={(e) => setMemberEdit({ ...memberEdit, amountPaid: Number(e.target.value) || 0 })} className="bg-accent/20 border-border mt-0.5 h-8 text-xs" /></div>
+                <div>
+                  <Label className="text-[10px]">{memberEdit.id ? "Amount Paid (from receipts)" : "Paid now (recorded as a receipt)"}</Label>
+                  <Input type="number" value={memberEdit.amountPaid} disabled={!!memberEdit.id} onChange={(e) => setMemberEdit({ ...memberEdit, amountPaid: Number(e.target.value) || 0 })} className="bg-accent/20 border-border mt-0.5 h-8 text-xs" />
+                  {memberEdit.id && <p className="mt-0.5 text-[9px] text-muted-foreground">Payments are recorded in Payments / Entries and split across members automatically.</p>}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <input id="vip" type="checkbox" checked={memberEdit.isVip} onChange={(e) => setMemberEdit({ ...memberEdit, isVip: e.target.checked })} />
@@ -1302,23 +1343,18 @@ function BookingsPage() {
           )}
           <Button onClick={() => {
             if (!memberEdit) return;
-            const paid = memberEdit.amountPaid;
-            const due = memberEdit.amountDue;
-            const status: "Paid" | "Partial" | "Unpaid" = paid >= due && due > 0 ? "Paid" : paid > 0 ? "Partial" : "Unpaid";
             if (!memberEdit.id) {
               // New member — create client and attach to booking
-              const { id: _omit, ...rest } = memberEdit;
+              // One atomic action: adds the member, ADDS their amount to the booking total, records any
+              // amount paid now as a receipt and re-splits payments (single Undo).
+              const { id: _omit, amountPaid: paidNow, ...rest } = memberEdit;
               void _omit;
-              const newId = store.addClient({ ...rest, paymentStatus: status });
-              const booking = store.bookings.find((bk) => bk.headId === memberEdit.headId);
-              if (booking) {
-                store.updateBooking(booking.id, {
-                  clientIds: [...booking.clientIds, newId],
-                  members: (booking.members || booking.clientIds.length) + 1,
-                });
-              }
+              store.addMemberToBooking({ ...rest, amountPaid: 0, paymentStatus: "Unpaid" }, paidNow || 0);
             } else {
-              store.updateClient(memberEdit.id, { ...memberEdit, paymentStatus: status });
+              // Changing a member's package amount moves the booking total by the same difference.
+              const { amountPaid: _keepLedger, paymentStatus: _status, ...fields } = memberEdit;
+              void _keepLedger; void _status;
+              store.updateClient(memberEdit.id, fields, { adjustBooking: true });
             }
             setMemberEditOpen(false);
           }} className="w-full">Save Member</Button>

@@ -1,6 +1,12 @@
 // Head / Group business economics — single source of truth for the Head Business View card.
-import type { Booking, Client } from "./data";
+import { getClientName, type Booking, type Client } from "./data";
 import type { LedgerEntry } from "./store";
+
+/** Head name = the lead (first) member of a Head ID, the same convention used by the Business View and statements. */
+export function getHeadName(headId: string, clients: Client[]): string {
+  const lead = clients.find((c) => c.headId === headId);
+  return lead ? getClientName(lead) : "—";
+}
 
 export interface HeadBusinessMember {
   id: string;

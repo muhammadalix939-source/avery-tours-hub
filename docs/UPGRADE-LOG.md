@@ -17,7 +17,16 @@ Single place to see what is done, what is verified and what is left. Update it w
 | Typecheck | `tsc --noEmit` = 0 errors | Run |
 | ESLint on `src/lib/pdf.ts` | Clean | Run |
 
+## Update 6 Nov 2026 - statements logic and bookings
+| Area | Change |
+|---|---|
+| Client statement | **Bug fixed:** callers pass every ledger row linked to the client or Head ID, so supplier purchases and supplier payments were printed on a client-facing PDF as "Payments Received" and distorted totals. The builder now keeps only client money: receipts, extra charges, refunds and discounts that belong to the client or its Head (unassigned charges go to the lead member, same rule as the store). Added Extra Charges and Refunds & Discounts sections; labels "BKG / RCPT"; removed "Filtered by Group" wording. |
+| Supplier statement | **Bug fixed:** supplier refunds and discounts were ignored, so the PDF disagreed with the Suppliers page. They are now listed as credits and deducted from payable. "Payments Received" renamed "Payments Made"; "Receipt" column renamed "Ref #". |
+| Bookings page | Every booking shows the Head name (lead member) under the Head ID in the table, in each booking card heading, in the Edit dialog title, in the action toasts, and as the sort key for "Name". Table cells no longer wrap figures. Helper: `getHeadName()` in `src/lib/heads.ts`. |
+
 ## Not verified / known limits
+- Statements print all-time totals (payable/paid) even when a date range is chosen; only the listed rows are filtered.
+- Supplier PDF totals come from ledger entries; the Suppliers page also applies `max(purchases, booking cost)`. They only differ when a booking cost exceeds itemised purchases.
 - `vite build` could not be run in the authoring sandbox (it also fails there on untouched main); verify the build in your normal environment.
 - Firebase / Google Fonts requests are blocked in the sandbox, so cloud sync was not exercised.
 - Refund convention differs between booking-level and traveller-level remaining (pre-existing, documented in AGENTS.md); intentionally unchanged.

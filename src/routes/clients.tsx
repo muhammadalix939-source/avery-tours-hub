@@ -88,7 +88,7 @@ function ClientsPage() {
 
   function downloadStatement(c: Client) {
     const entries = store.entries.filter((e) => e.referenceId === c.id || e.headId === c.headId);
-    generateClientStatement(c, entries);
+    generateClientStatement(c, entries, { clients: store.clients });
   }
 
   const relatedEntries = selected ? store.entries.filter((e) => e.referenceId === selected.id || e.headId === selected.headId) : [];

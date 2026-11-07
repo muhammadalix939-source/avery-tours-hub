@@ -6,7 +6,7 @@ import StatsCard from "@/components/StatsCard";
 import StatusBadge from "@/components/StatusBadge";
 import PageHeader from "@/components/PageHeader";
 import NewEntryDialog from "@/components/NewEntryDialog";
-import { formatCurrency } from "@/lib/data";
+import { formatCurrency, netCommissionOf } from "@/lib/data";
 import { useStore } from "@/lib/store";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 
@@ -52,7 +52,7 @@ function Dashboard() {
   const purchaseHeads = new Set(store.entries.filter((e) => e.type === "purchase" && e.headId).map((e) => e.headId));
   const bookingCostFallback = store.bookings.filter((b) => !purchaseHeads.has(b.headId)).reduce((s, b) => s + (b.totalCost || 0), 0);
   const totalBusinessCost = Math.max(0, livePurchases + bookingCostFallback - supplierRefunds);
-  const agentCommissionEarned = store.bookings.reduce((s, b) => s + (b.commission || 0), 0);
+  const agentCommissionEarned = store.bookings.reduce((s, b) => s + netCommissionOf(b), 0);
   const bookedSales = store.bookings.reduce((s, b) => s + b.totalAmount, 0);
   const totalRevenue = liveClientReceived + (o.revenue || 0);
   const totalPending = Math.max(0, bookedSales + (o.pending || 0) - totalRevenue);

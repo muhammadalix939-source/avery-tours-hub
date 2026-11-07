@@ -147,7 +147,19 @@ export interface BookingFinancials {
   marginPercent: number;
 }
 
+/** Commission the agent actually keeps: gross commission minus any discount settled from it (agent-settled, real agent). */
+export function netCommissionOf(b: Pick<Booking, "agentId" | "commission" | "discount" | "discountSettlement">): number {
+  const gross = Number(b.commission) || 0;
+  const hasAgent = !!b.agentId && b.agentId !== "Direct";
+  if (hasAgent && b.discountSettlement === "agent_commission") {
+    return Math.max(0, gross - Math.min(gross, Number(b.discount) || 0));
+  }
+  return gross;
+}
+
 export function computeBookingFinancials(b: Booking): BookingFinancials {
+  // booking.totalAmount is ALREADY net of the client discount (the store derives it that way), so
+  // revenue = totalAmount and the gross sale is revenue + the booking-form discount.
   const sale = Number(b.totalAmount) || 0;
   const discount = Number(b.discount) || 0;
   const supplierDisc = Number(b.supplierDiscount) || 0;
@@ -159,8 +171,9 @@ export function computeBookingFinancials(b: Booking): BookingFinancials {
   let agentAbsorbedDiscount = 0;
   let agencyAbsorbedDiscount = 0;
 
-  // When booking has an agent and settlement is offset against agent commission:
-  if (b.agentId && b.agentId !== "Direct" && b.discountSettlement === "agent_commission") {
+  // With a real agent and settlement "agent_commission", the agent gives back up to their commission.
+  const hasAgent = !!b.agentId && b.agentId !== "Direct";
+  if (hasAgent && b.discountSettlement === "agent_commission") {
     agentAbsorbedDiscount = Math.min(originalCommission, discount);
     netCommission = Math.max(0, originalCommission - agentAbsorbedDiscount);
     agencyAbsorbedDiscount = Math.max(0, discount - agentAbsorbedDiscount);
@@ -168,13 +181,15 @@ export function computeBookingFinancials(b: Booking): BookingFinancials {
     agencyAbsorbedDiscount = discount;
   }
 
-  // Net agency profit: Sale revenue (after agency-absorbed discount) - net supplier cost - net commission
-  const netProfit = (sale - agencyAbsorbedDiscount) - netCost - netCommission;
+  // Profit = (gross − full discount) − net supplier cost − net commission.
+  // (The old formula subtracted only the agency's share of the discount from revenue, which counted the
+  //  agent-absorbed part twice in the agency's favour.)
+  const netProfit = sale - netCost - netCommission;
   const isLoss = netProfit < 0;
 
   return {
     sale,
-    grossSale: sale,
+    grossSale: sale + discount,
     discount,
     supplierDiscount: supplierDisc,
     netCost,

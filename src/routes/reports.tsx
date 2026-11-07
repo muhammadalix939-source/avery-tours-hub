@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { useMemo, useState, useEffect } from "react";
 import { DollarSign, TrendingUp, Wallet, Receipt, Users, BookOpen, Percent, PiggyBank, Activity, Award } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
-import { formatCurrency } from "@/lib/data";
+import { formatCurrency, netCommissionOf } from "@/lib/data";
 import { useStore } from "@/lib/store";
 import { computeTotals, profitByPackage, monthlyTrend, expenseBreakdown, topProfitableBookings } from "@/lib/reports";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -100,7 +100,7 @@ function ReportsPage() {
   const drillCommissionPaid = () => openDrill("Commissions Paid",
     filteredEntries.filter(e => e.type === "agent_commission").map(e => ({ label: e.referenceName, sub: e.note, date: e.date, amount: e.amount })));
   const drillCommissionEarned = () => openDrill("Commissions Earned (per Booking)",
-    filteredBookings.filter(b => (b.commission || 0) > 0).map(b => ({ label: `Booking ${b.headId}`, sub: b.packageType, date: b.createdAt, amount: b.commission || 0 })));
+    filteredBookings.filter(b => (b.commission || 0) > 0).map(b => ({ label: `Booking ${b.headId}`, sub: b.packageType, date: b.createdAt, amount: netCommissionOf(b) })));
   const drillPending = () => openDrill("Pending Receivables",
     filteredBookings.filter(b => (b.totalAmount - b.amountReceived) > 0).map(b => ({ label: `Booking ${b.headId}`, sub: `${b.packageType} · received ${formatCurrency(b.amountReceived)}`, date: b.createdAt, amount: b.totalAmount - b.amountReceived })));
   const drillSupplierPayable = () => openDrill("Supplier Payable",

@@ -1,11 +1,52 @@
 // Head / Group business economics — single source of truth for the Head Business View card.
 import { getClientName, type Booking, type Client } from "./data";
 import type { LedgerEntry } from "./store";
+import { headCostOf, headSupplierPaid, headSupplierRefundOf, entryTouchesHead, allocatedPurchasesOf, type AllocatedPurchaseRow } from "./allocations";
 
 /** Head name = the lead (first) member of a Head ID, the same convention used by the Business View and statements. */
 export function getHeadName(headId: string, clients: Client[]): string {
   const lead = clients.find((c) => c.headId === headId);
   return lead ? getClientName(lead) : "—";
+}
+
+/** A booking has a real agent only when agentId is set and not the literal "Direct". */
+export function hasRealAgent(b?: Pick<Booking, "agentId"> | null): boolean {
+  return !!b && !!b.agentId && b.agentId !== "Direct";
+}
+
+/** "ID — Name" pair used on every statement / table so an ID is never shown without who it belongs to. */
+export function idName(id: string | undefined | null, name: string | undefined | null): string {
+  const i = (id || "").trim();
+  const n = (name || "").trim();
+  if (i && n && n !== "—" && n !== i) return `${i} — ${n}`;
+  return i || n || "—";
+}
+
+export interface BookingMoney {
+  /** Package + extra charges, before any concession. */
+  gross: number;
+  charges: number;
+  refunds: number;
+  /** Booking-form discount + every client_discount ledger entry. */
+  discount: number;
+  /** gross − refunds − discount: what the client actually owes. */
+  net: number;
+  received: number;
+  pending: number;
+}
+
+/** Client-facing money for a booking. Always net of discount — use this (not booking.totalAmount) in views & statements. */
+export function computeBookingMoney(b: Booking, entries: LedgerEntry[]): BookingMoney {
+  const mine = entries.filter((e) => e.headId === b.headId);
+  const sum = (t: LedgerEntry["type"]) => mine.filter((e) => e.type === t).reduce((s, e) => s + e.amount, 0);
+  const base = b.baseAmount ?? b.totalAmount;
+  const charges = sum("client_charge");
+  const refunds = sum("client_refund");
+  const discount = Math.max(0, Number(b.discount) || 0) + sum("client_discount");
+  const gross = base + charges;
+  const net = Math.max(0, gross - refunds - discount);
+  const received = b.amountReceived || 0;
+  return { gross, charges, refunds, discount, net, received, pending: Math.max(0, net - received) };
 }
 
 export interface HeadBusinessMember {
@@ -26,6 +67,12 @@ export interface HeadBusiness {
   otherCosts: number;
   totalSale: number;
   refunds: number;
+  /** Client discount / concession (booking-form + ledger). */
+  discount: number;
+  /** Share of the discount carried by the agent's commission (agent-settled) */
+  agentAbsorbedDiscount: number;
+  /** Gross commission before any discount offset. */
+  grossCommission: number;
   netReceivable: number;
   totalPurchase: number;
   commission: number;
@@ -36,6 +83,8 @@ export interface HeadBusiness {
   supplierRemaining: number;
   memberList: HeadBusinessMember[];
   linked: LedgerEntry[];
+  /** Purchases (or shares of split purchases) that make up this head's cost. */
+  allocatedPurchases: AllocatedPurchaseRow[];
 }
 
 /** Flat, disclosed amounts only — no interest, no compounding. */
@@ -47,34 +96,31 @@ export function computeHeadBusiness(
 ): HeadBusiness {
   const members = clients.filter((c) => c.headId === headId);
   const booking = bookings.find((b) => b.headId === headId);
-  const linked = entries.filter((e) => e.headId === headId);
+  // Includes purchases / supplier payments that reach this head only through a Cost Allocation line.
+  const linked = entries.filter((e) => entryTouchesHead(e, headId));
 
   const otherCosts = linked.filter((e) => e.type === "client_charge").reduce((s, e) => s + e.amount, 0);
   const base = booking?.baseAmount ?? booking?.totalAmount ?? members.reduce((s, c) => s + (c.baseDue ?? c.amountDue), 0);
   const perPerson = members.length ? Math.round(base / members.length) : base;
-  const totalSale = perPerson * (members.length || 1) + otherCosts;
+  // Exact package total (not perPerson × members, which drifts by rounding when the total does not divide evenly).
+  const totalSale = base + otherCosts;
   const refunds = linked.filter((e) => e.type === "client_refund").reduce((s, e) => s + e.amount, 0);
-  const netReceivable = totalSale - refunds;
-  const purchaseEntries = linked.filter((e) => e.type === "purchase");
-  const supplierRefunds = linked.filter((e) => e.type === "supplier_refund").reduce((s, e) => s + e.amount, 0);
-  const totalPurchase = Math.max(purchaseEntries.reduce((s, e) => s + e.amount, 0), booking?.totalCost || 0) - supplierRefunds;
-  const commission = booking?.commission || 0;
+  const bookingDiscount = Math.max(0, Number(booking?.discount) || 0);
+  const discount = bookingDiscount + linked.filter((e) => e.type === "client_discount").reduce((s, e) => s + e.amount, 0);
+  const netReceivable = Math.max(0, totalSale - refunds - discount);
+  // Cost the head bears = its allocation lines (legacy single-target entries are adapted 1:1).
+  const supplierRefunds = headSupplierRefundOf(entries, headId);
+  const totalPurchase = Math.max(headCostOf(entries, headId), booking?.totalCost || 0) - supplierRefunds;
+  const grossCommission = booking?.commission || 0;
+  // A discount settled from the agent's commission is absorbed by the agent (up to the commission); it is
+  // already deducted from revenue above, so profit must NOT also gain it back through a smaller commission twice.
+  const agentAbsorbedDiscount = hasRealAgent(booking) && booking?.discountSettlement === "agent_commission" ? Math.min(grossCommission, bookingDiscount) : 0;
+  const commission = Math.max(0, grossCommission - agentAbsorbedDiscount);
   const received = linked.filter((e) => e.type === "client_receive").reduce((s, e) => s + e.amount, 0);
 
   // ---- Supplier Paid / Remaining for THIS head's purchases only ----
-  // 1) Payments explicitly tagged to this head (Head ID field on a Supplier Payment entry).
-  const directSupplierPaid = linked.filter((e) => e.type === "supplier_payment").reduce((s, e) => s + e.amount, 0);
-  // 2) This head may share a PNR / batch Group with other heads. Any payment made against
-  //    that group WITHOUT a specific head tag is prorated by this head's share of the group's bill.
-  const groupIds = new Set(purchaseEntries.map((e) => e.groupId).filter(Boolean) as string[]);
-  let proratedSupplierPaid = 0;
-  groupIds.forEach((gid) => {
-    const groupBill = entries.filter((e) => e.type === "purchase" && e.groupId === gid).reduce((s, e) => s + e.amount, 0);
-    const groupUntaggedPaid = entries.filter((e) => e.type === "supplier_payment" && e.groupId === gid && !e.headId).reduce((s, e) => s + e.amount, 0);
-    const thisHeadShare = purchaseEntries.filter((e) => e.groupId === gid).reduce((s, e) => s + e.amount, 0);
-    if (groupBill > 0) proratedSupplierPaid += groupUntaggedPaid * (thisHeadShare / groupBill);
-  });
-  const supplierPaid = Math.round(directSupplierPaid + proratedSupplierPaid);
+  // Direct head tags + this head's pro-rata share of group-tagged supplier money (see allocations.headSupplierPaid).
+  const supplierPaid = headSupplierPaid(entries, headId);
   const supplierRemaining = Math.max(0, Math.round(totalPurchase - supplierPaid));
 
   // ---- Per-member (Members View) breakdown ----
@@ -100,6 +146,9 @@ export function computeHeadBusiness(
     otherCosts,
     totalSale,
     refunds,
+    discount,
+    agentAbsorbedDiscount,
+    grossCommission,
     netReceivable,
     totalPurchase,
     commission,
@@ -110,5 +159,6 @@ export function computeHeadBusiness(
     supplierRemaining,
     memberList,
     linked,
+    allocatedPurchases: allocatedPurchasesOf(entries, headId),
   };
 }

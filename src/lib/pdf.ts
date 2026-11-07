@@ -1,11 +1,13 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { formatCurrency, getClientName } from "./data";
+import { formatCurrency, getClientName, netCommissionOf } from "./data";
 import type {
   Client, Agent, Supplier, Booking,
   HotelService, FlightService, TransportService, VisaService, OtherService,
 } from "./data";
 import type { LedgerEntry } from "./store";
+import { computeBookingMoney, idName } from "./heads";
+import { agentOtherSaleRows } from "./allocations";
 import { AVERY_LOGO_JPEG } from "@/assets/avery-logo";
 
 // =========================================================================
@@ -302,6 +304,15 @@ function brandTable(doc: jsPDF, opts: Parameters<typeof autoTable>[1]) {
   });
 }
 
+/** Truncate text with an ellipsis so it never runs past its box (uses the font currently set on the doc). */
+function fit(doc: jsPDF, text: string, maxW: number): string {
+  const t = String(text ?? "");
+  if (doc.getTextWidth(t) <= maxW) return t;
+  let out = t;
+  while (out.length > 1 && doc.getTextWidth(out + "…") > maxW) out = out.slice(0, -1);
+  return out.trimEnd() + "…";
+}
+
 function partyBlock(doc: jsPDF, x: number, y: number, w: number, label: string, lines: Array<[string, string]>) {
   // Box with gold left bar + ivory fill
   doc.setFillColor(...IVORY);
@@ -324,7 +335,7 @@ function partyBlock(doc: jsPDF, x: number, y: number, w: number, label: string, 
     setSans(doc, "bold");
     doc.text(`${k}:`, x + 4, y + 10 + i * 5);
     setSans(doc, "normal");
-    doc.text(String(v || "—"), x + 28, y + 10 + i * 5);
+    doc.text(fit(doc, String(v || "—"), w - 32), x + 28, y + 10 + i * 5);
   });
   return y + 6 + lines.length * 5 + 6;
 }
@@ -384,10 +395,15 @@ function summaryCards(doc: jsPDF, y: number, cards: Array<[string, string, "ink"
     else if (tone === "danger") doc.setTextColor(...DANGER);
     else if (tone === "gold") doc.setTextColor(...GOLD);
     else doc.setTextColor(...NAVY);
-    doc.text(value, x + 3, y + 13.5);
+    doc.text(fit(doc, value, cardW - 5), x + 3, y + 13.5);
   });
   doc.setTextColor(...INK);
   return y + 23;
+}
+
+/** File-name-safe fragment (keeps letters/digits, collapses the rest to _). */
+function slug(t: string): string {
+  return (t || "").normalize("NFKD").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
 }
 
 function save(doc: jsPDF, name: string) {
@@ -410,6 +426,9 @@ function labelType(t: LedgerEntry["type"]): string {
     case "purchase": return "Purchase";
     case "client_charge": return "Extra Charge";
     case "client_refund": return "Client Refund";
+    case "client_discount": return "Discount";
+    case "agent_receive": return "Agent Receipt";
+    case "other_sale": return "Other Sale";
     case "supplier_refund": return "Supplier Refund";
     default: return t;
   }
@@ -555,7 +574,7 @@ export async function generateSupplierLedger(supplier: Supplier, entries: Ledger
   y = supplierMetaBar(doc, y, {
     stmtNo: `AV-SS-${supplier.id.replace(/[^0-9A-Z]/gi, "")}-${new Date().getFullYear()}`,
     period: periodLabel,
-    groupLabel: opts.groupId ? (opts.groupLabel || opts.groupId) : undefined,
+    groupLabel: opts.groupId ? (opts.groupLabel && !opts.groupLabel.includes(opts.groupId) ? `${opts.groupId} — ${opts.groupLabel}` : (opts.groupLabel || opts.groupId)) : undefined,
   });
   y = supplierIdentityCard(doc, y, supplier);
   const pctPaid = grandPayable > 0 ? Math.max(0, Math.min(100, (grandPaid / grandPayable) * 100)) : 0;
@@ -654,7 +673,7 @@ export async function generateSupplierLedger(supplier: Supplier, entries: Ledger
   closingHero(doc, y, remaining);
 
   footer(doc);
-  save(doc, `Avery_Supplier_Statement_${supplier.id}.pdf`);
+  save(doc, `Avery_Supplier_Statement_${supplier.id}_${slug(supplier.companyName)}.pdf`);
 }
 
 // ---- High-End Luxury Executive Statement Chrome ----
@@ -818,7 +837,7 @@ function supplierIdentityCard(doc: jsPDF, y: number, s: Supplier): number {
   return y + h + 5;
 }
 
-function clientIdentityCard(doc: jsPDF, y: number, c: Client): number {
+function clientIdentityCard(doc: jsPDF, y: number, c: Client, headName?: string): number {
   const h = 26;
   // Card
   doc.setFillColor(...WHITE);
@@ -840,14 +859,14 @@ function clientIdentityCard(doc: jsPDF, y: number, c: Client): number {
   setSerif(doc, "bold");
   doc.setFontSize(13);
   doc.setTextColor(...WHITE);
-  doc.text(getClientName(c) || "—", 20, y + 12.5);
+  doc.text(fit(doc, getClientName(c) || "—", 52), 20, y + 12.5);
 
   setSans(doc, "normal");
   doc.setFontSize(7.5);
   doc.setTextColor(...GOLD_LT);
   doc.text(`Client ID: ${c.id}`, 20, y + 17.5);
   doc.setTextColor(...WHITE);
-  doc.text(`Head ID: ${c.headId}`, 20, y + 22);
+  doc.text(fit(doc, `Head: ${idName(c.headId, headName)}`, 52), 20, y + 22);
 
   // Right details grid
   const col1 = 82;
@@ -1282,14 +1301,17 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   const bDate = (b: Booking) => ((b as any).createdAt ? String((b as any).createdAt).slice(0, 10) : b.travelDate);
   const leadName = (h: string) => { const c = clients.find((x) => x.headId === h); return c ? getClientName(c) : "—"; };
 
-  const otherRows = entries.filter((e) => (e.type === "purchase" && e.purchasedFor === "agent" && e.agentId === agent.id) || (e.type === "other_sale" && e.referenceId === agent.id));
-  const otherSaleOf = (e: LedgerEntry) => (e.type === "purchase" ? (e.saleAmount ?? e.amount) : e.amount);
+  const otherSaleRowList = agentOtherSaleRows(entries, agent.id);
+  const rowOf = new Map(otherSaleRowList.map((r) => [r.entry.id, r]));
+  const otherRows = otherSaleRowList.map((r) => r.entry);
+  const otherSaleOf = (e: LedgerEntry) => rowOf.get(e.id)?.sale ?? 0;
+  const otherCostOf = (e: LedgerEntry) => rowOf.get(e.id)?.cost ?? 0;
   const clientReceipts = entries.filter((e) => (e.type === "client_receive" || e.type === "client_refund" || e.type === "client_charge") && e.headId && headIds.has(e.headId));
   const agentReceipts = entries.filter((e) => e.type === "agent_receive" && (e.referenceId === agent.id || e.agentId === agent.id));
   const commissionPaid = entries.filter((e) => e.type === "agent_commission" && e.referenceId === agent.id);
 
   // signed movement of the agent account: + increases what he owes us, − reduces it
-  const bookingNet = (b: Booking) => (b.totalAmount || 0) - (b.commission || 0);
+  const bookingNet = (b: Booking) => (b.totalAmount || 0) - netCommissionOf(b);
   const clientMove = (e: LedgerEntry) => (e.type === "client_charge" ? e.amount : -e.amount);
 
   // ---------- Opening balance ----------
@@ -1310,13 +1332,13 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   const pAgentRec = agentReceipts.filter((e) => within(e.date) || (!from && !to));
 
   const grossSale = pBookings.reduce((s, b) => s + (b.totalAmount || 0), 0);
-  const commission = pBookings.reduce((s, b) => s + (b.commission || 0), 0);
+  const commission = pBookings.reduce((s, b) => s + netCommissionOf(b), 0);
   const netClient = grossSale - commission;
   const extraCharges = pClientTx.filter((e) => e.type === "client_charge").reduce((s, e) => s + e.amount, 0);
   const refunds = pClientTx.filter((e) => e.type === "client_refund").reduce((s, e) => s + e.amount, 0);
   const clientReceived = pClientTx.filter((e) => e.type === "client_receive").reduce((s, e) => s + e.amount, 0);
   const otherSale = pOther.reduce((s, e) => s + otherSaleOf(e), 0);
-  const otherCost = pOther.filter((e) => e.type === "purchase").reduce((s, e) => s + e.amount, 0);
+  const otherCost = pOther.reduce((s, e) => s + otherCostOf(e), 0);
   const agentReceived = pAgentRec.reduce((s, e) => s + e.amount, 0);
   const totalReceived = clientReceived + agentReceived;
   const periodBusiness = netClient + extraCharges - refunds + otherSale;
@@ -1358,7 +1380,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
       body: pBookings.length ? pBookings.map((b) => [
         fmtDate(bDate(b)), b.headId, leadName(b.headId), b.packageType || "—",
         String(clients.filter((c) => c.headId === b.headId).length),
-        money(b.totalAmount || 0, INK), money(b.commission || 0, DANGER), money(bookingNet(b)),
+        money(b.totalAmount || 0, INK), money(netCommissionOf(b), DANGER), money(bookingNet(b)),
       ]) : [[{ content: "No client bookings in this period", colSpan: 8, styles: { halign: "center" as const, textColor: MUTED } }]],
       foot: [[
         { content: "Totals", colSpan: 5, styles: { halign: "right" as const, fontStyle: "bold" as const, fillColor: ROW_ALT, textColor: NAVY } },
@@ -1404,7 +1426,10 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
           } else {
             desc = [d.description, e.chargeCategory, e.note].filter(Boolean).join(" · ") || "Service";
           }
-          return [fmtDate(e.date), e.id, e.forClientName || "—", desc, money(otherSaleOf(e))];
+          const r = rowOf.get(e.id);
+          // Split purchase: say plainly which share of the supplier bill this line is.
+          if (r && e.allocations && e.allocations.length > 1) desc += `\nShare of ${e.id} (cost ${formatCurrency(r.cost)} of ${formatCurrency(e.amount)})`;
+          return [fmtDate(e.date), e.id, r?.line?.forClientName || e.forClientName || "—", desc, money(otherSaleOf(e))];
         }),
         foot: footRow(`Total ${k}`, 4, tot),
       });
@@ -1427,7 +1452,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
       [{ content: "Business booked in period (net of commission)", colSpan: 4 }, money(netClient + otherSale, INK), "", money((running += netClient + otherSale))],
       ...recRows.map(({ e, label, sign }) => {
         running += sign * e.amount;
-        return [fmtDate(e.date), e.id, e.headId || "—", label,
+        return [fmtDate(e.date), e.id, e.headId ? idName(e.headId, leadName(e.headId)) : "—", label,
           sign > 0 ? money(e.amount, INK) : "", sign < 0 ? money(e.amount, SUCCESS) : "", money(running)];
       }),
     ],
@@ -1457,7 +1482,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   void otherCost; // internal profit is never printed on an agent-facing statement
 
   // Commission account (separate)
-  const commEarned = bookings.reduce((s, b) => s + (b.commission || 0), 0) + (agent.openingCommission || 0);
+  const commEarned = bookings.reduce((s, b) => s + netCommissionOf(b), 0) + (agent.openingCommission || 0);
   const commPaid = commissionPaid.reduce((s, e) => s + e.amount, 0) + (agent.openingPaidCommission || 0);
   y = summaryCards(doc, y, [
     ["Commission Earned", formatCurrency(commEarned), "gold"],
@@ -1466,7 +1491,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   ]);
 
   footer(doc);
-  save(doc, `Avery_Agent_Statement_${agent.id}_${scope}.pdf`);
+  save(doc, `Avery_Agent_Statement_${agent.id}_${slug(agent.name)}_${scope}.pdf`);
 }
 
 // =========================================================================
@@ -1500,15 +1525,17 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
   const totalPaid = client.amountPaid + openingPaid;
   const remaining = totalDue - totalPaid;
 
+  const headLead = opts.clients?.find((c) => c.headId === client.headId);
+  const headName = headLead ? getClientName(headLead) : undefined;
   let y = 66;
   y = supplierMetaBar(doc, y, {
     stmtNo: `AV-CS-${client.id.replace(/[^0-9A-Z]/gi, "")}-${new Date().getFullYear()}`,
     period: periodLabel,
-    groupLabel: client.packageType ? `${client.packageType} Package · Head ${client.headId}` : undefined,
+    groupLabel: client.packageType ? `${client.packageType} Package · Head ${idName(client.headId, headName)}` : undefined,
     groupPrefix: "",
   });
 
-  y = clientIdentityCard(doc, y, client);
+  y = clientIdentityCard(doc, y, client, headName);
 
   const pctPaid = totalDue > 0 ? Math.max(0, Math.min(100, (totalPaid / totalDue) * 100)) : 0;
   y = executiveSnapshot(doc, y, {
@@ -1578,22 +1605,32 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
       setSerif(doc, "italic");
       doc.setFontSize(7.5);
       doc.setTextColor(...MUTED);
-      doc.text("Receipts are recorded against the booking (Head " + client.headId + ") and allocated across its members; the total above is this client's allocated share.", 14, y - 3, { maxWidth: 182 });
-      y += 4;
+      doc.text("Receipts are recorded against the booking (Head " + idName(client.headId, headName) + ") and allocated across its members; the total above is this client's allocated share.", 14, y - 3, { maxWidth: 182 });
+      y += 9;
     }
   }
 
-  if (adjustments.length) {
-    const adjTotal = adjustments.reduce((s, e) => s + e.amount, 0);
-    y = categoryHeading(doc, y, "Refunds & Discounts", adjustments.length, adjTotal, "success");
+  // Discount that reduced this client's due but is not an individual ledger line of theirs
+  // (typed on the booking form, or an unassigned head discount that spilled onto this member).
+  const listedDiscount = adjustments.filter((e) => e.type === "client_discount").reduce((s, e) => s + e.amount, 0);
+  const appliedDiscount = Math.max(0, (client.baseDue ?? client.amountDue) + (client.extraCharges || 0) - (client.refunded || 0) - client.amountDue);
+  const headDiscount = Math.max(0, Math.round(appliedDiscount - listedDiscount));
+  if (adjustments.length || headDiscount > 0) {
+    const adjTotal = adjustments.reduce((s, e) => s + e.amount, 0) + headDiscount;
+    y = categoryHeading(doc, y, "Refunds & Discounts", adjustments.length + (headDiscount > 0 ? 1 : 0), adjTotal, "success");
+    const adjBody: any[] = adjustments.map((a) => [
+      fmtDate(a.date), a.id,
+      [a.type === "client_refund" ? "Refund to client" : "Discount allowed", a.note].filter(Boolean).join(" — "),
+      { content: formatCurrency(a.amount), styles: { halign: "right" as const } },
+    ]);
+    if (headDiscount > 0) {
+      adjBody.push(["—", "—", "Discount allowed on booking (already deducted from Total Payable)", { content: formatCurrency(headDiscount), styles: { halign: "right" as const } }]);
+    }
     brandTable(doc, {
       startY: y + 1,
       head: [["Date", "Ref #", "Type / Note", "Amount"]],
-      body: adjustments.map((a) => [
-        fmtDate(a.date), a.id,
-        [a.type === "client_refund" ? "Refund to client" : "Discount allowed", a.note].filter(Boolean).join(" — "),
-        { content: formatCurrency(a.amount), styles: { halign: "right" as const } },
-      ]),
+      body: adjBody,
+      columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 24 }, 3: { cellWidth: 34 } },
     });
     y = (doc as any).lastAutoTable.finalY + 7;
   }
@@ -1617,7 +1654,7 @@ export async function generateClientStatement(client: Client, entries: LedgerEnt
   });
 
   footer(doc);
-  save(doc, `Avery_Client_Statement_${client.id}.pdf`);
+  save(doc, `Avery_Client_Statement_${client.id}_${slug(getClientName(client))}.pdf`);
 }
 
 // =========================================================================
@@ -1627,7 +1664,8 @@ export async function generatePaymentHistory(
   title: string,
   ownerInfo: Array<[string, string]>,
   entries: LedgerEntry[],
-  summary: Array<[string, string, string?]>
+  summary: Array<[string, string, string?]>,
+  opts: { fileKey?: string; extraAdjustments?: Array<{ date: string; ref: string; note: string; kind: "discount" | "charge"; amount: number }> } = {},
 ) {
   const doc = new jsPDF();
   await loadPdfFonts(doc);
@@ -1636,46 +1674,80 @@ export async function generatePaymentHistory(
   let y = 44;
   y = fromAndTo(doc, y, title, ownerInfo.slice(0, 4).map(([k, v]) => [k, v] as [string, string]));
 
-  const cards: Array<[string, string, "ink" | "success" | "danger" | "gold"]> = summary.slice(0, 4).map(([l, v, c]) => [
+  const cards: Array<[string, string, "ink" | "success" | "danger" | "gold"]> = summary.slice(0, 5).map(([l, v, c]) => [
     l, v,
     (c === "success" ? "success" : c === "destructive" ? "danger" : c === "gold" ? "gold" : "ink"),
   ]);
   y = summaryCards(doc, y, cards);
   y += 2;
 
+  // Money movements (receipts, refunds, payments) vs. price adjustments (charges added / discounts allowed).
+  const isAdjustment = (e: LedgerEntry) => e.type === "client_charge" || e.type === "client_discount";
+  const byDate = (a: LedgerEntry, b: LedgerEntry) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id);
+  const movements = entries.filter((e) => !isAdjustment(e)).sort(byDate);
+  const adjustments = entries.filter(isAdjustment).sort(byDate);
+  const outflow = (e: LedgerEntry) => e.type === "client_refund" || e.type === "supplier_refund";
+
   y = sectionTitle(doc, "Transaction History", y); y += 4;
   let running = 0;
+  const body: any[] = movements.map((e) => {
+    running += outflow(e) ? -e.amount : e.amount;
+    return [
+      fmtDate(e.date), e.id, e.note || e.referenceName || "—", labelType(e.type),
+      { content: `${outflow(e) ? "− " : ""}${formatCurrency(e.amount)}`, styles: { halign: "right" as const, textColor: outflow(e) ? DANGER : INK } },
+      { content: formatCurrency(running), styles: { halign: "right" as const, textColor: NAVY } },
+    ];
+  });
+  if (!body.length) {
+    body.push([{ content: "No payments have been recorded yet.", colSpan: 6, styles: { halign: "center" as const, textColor: MUTED, cellPadding: 6 } }]);
+  }
   brandTable(doc, {
     startY: y + 1,
-    head: [["Date", "Receipt", "Description", "Type", "Amount", "Running"]],
-    body: entries.map((e) => {
-      running += e.amount;
-      return [
-        fmtDate(e.date), e.id, e.note || e.referenceName, labelType(e.type),
-        { content: formatCurrency(e.amount), styles: { halign: "right" as const } },
-        { content: formatCurrency(running), styles: { halign: "right" as const, textColor: NAVY } },
-      ];
-    }),
+    head: [["Date", "Receipt #", "Description", "Type", "Amount", "Running Total"]],
+    body,
+    columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 22 }, 4: { cellWidth: 30 }, 5: { cellWidth: 32 } },
   });
+  y = (doc as any).lastAutoTable.finalY + 7;
+
+  // Ledger adjustments + any booking-level concession passed by the caller (e.g. the discount typed on the booking form).
+  const adjRows: Array<{ date: string; ref: string; note: string; label: string; discount: boolean; amount: number }> = [
+    ...adjustments.map((e) => ({ date: e.date, ref: e.id, note: [e.chargeCategory, e.note].filter(Boolean).join(" — ") || e.referenceName || "—", label: labelType(e.type), discount: e.type === "client_discount", amount: e.amount })),
+    ...(opts.extraAdjustments || []).filter((x) => x.amount > 0).map((x) => ({ date: x.date, ref: x.ref, note: x.note, label: x.kind === "discount" ? "Discount" : "Extra Charge", discount: x.kind === "discount", amount: x.amount })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+  if (adjRows.length) {
+    y = sectionTitle(doc, "Charges & Concessions", y); y += 4;
+    brandTable(doc, {
+      startY: y + 1,
+      head: [["Date", "Ref #", "Description", "Type", "Effect on Balance"]],
+      body: adjRows.map((r) => [
+        fmtDate(r.date), r.ref, r.note, r.label,
+        { content: `${r.discount ? "− " : "+ "}${formatCurrency(r.amount)}`, styles: { halign: "right" as const, textColor: r.discount ? SUCCESS : INK } },
+      ]),
+      columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 22 }, 4: { cellWidth: 38 } },
+    });
+  }
 
   footer(doc);
-  save(doc, `Avery_Payment_History_${title.replace(/\s+/g, "_")}.pdf`);
+  save(doc, `Avery_Payment_History_${opts.fileKey || slug(title)}.pdf`);
 }
 
 // =========================================================================
 //  INVOICE
 // =========================================================================
-export async function generateInvoice(booking: Booking, clients: Client[], agent?: Agent, supplier?: Supplier) {
+export async function generateInvoice(booking: Booking, clients: Client[], agent?: Agent, supplier?: Supplier, entries: LedgerEntry[] = []) {
   const doc = new jsPDF();
   await loadPdfFonts(doc);
   header(doc, "Tax Invoice");
 
+  const money = computeBookingMoney(booking, entries);
+  const leadName = clients[0] ? getClientName(clients[0]) : "";
+
   let y = 44;
   y = fromAndTo(doc, y, "Bill To", [
-    ["Head ID", booking.headId],
-    ["Lead", clients[0] ? getClientName(clients[0]) : "—"],
+    ["Head", idName(booking.headId, leadName)],
     ["Phone", clients[0]?.phone || "—"],
-    ["Members", String(booking.members || clients.length)],
+    ["Members", String(clients.length || booking.members)],
+    ["Agent", agent ? idName(agent.id, agent.name) : "Direct"],
   ]);
 
   // Meta strip
@@ -1689,56 +1761,114 @@ export async function generateInvoice(booking: Booking, clients: Client[], agent
   doc.setTextColor(...INK);
   y += 11;
 
-  y = sectionTitle(doc, "Client Breakdown", y); y += 4;
+  // ---- Client breakdown: package, concessions and what each person actually owes ----
+  const rows = clients.map((c) => {
+    const pkg = c.baseDue ?? c.amountDue;
+    const extra = c.extraCharges || 0;
+    const refund = c.refunded || 0;
+    const disc = Math.max(0, pkg + extra - refund - c.amountDue);
+    return { c, pkg, extra, refund, disc };
+  });
+  const showExtra = rows.some((r) => r.extra > 0);
+  const showDisc = rows.some((r) => r.disc > 0);
+  const showRefund = rows.some((r) => r.refund > 0);
+  // Amounts in the table are plain numbers (the header says PKR) so a column never wraps "Rs" onto its own line.
+  const num = (n: number) => formatCurrency(n).replace(/^Rs\s*/, "");
+  const right = (t: string, color?: [number, number, number]) => ({ content: t, styles: { halign: "right" as const, ...(color ? { textColor: color } : {}) } });
+  const rightHead = (t: string) => ({ content: t, styles: { halign: "right" as const } });
+
+  y += 1;
+  y = sectionTitle(doc, "Client Breakdown  ·  Amounts in PKR", y); y += 4;
+  const cols: Record<number, any> = { 0: { cellWidth: 8 } };
+  let ci = 3; // after #, Client, Passport
+  const moneyW = 22;
+  cols[ci++] = { cellWidth: moneyW };
+  if (showExtra) cols[ci++] = { cellWidth: moneyW - 3 };
+  if (showRefund) cols[ci++] = { cellWidth: moneyW - 3 };
+  if (showDisc) cols[ci++] = { cellWidth: moneyW - 2 };
+  cols[ci++] = { cellWidth: moneyW }; // net due
+  cols[ci++] = { cellWidth: moneyW }; // paid
+  cols[ci++] = { cellWidth: 16 };     // status
+  cols[2] = { cellWidth: 22 };
   brandTable(doc, {
     startY: y + 1,
-    head: [["#", "Client ID", "Name", "Passport", "Due", "Paid", "Status"]],
-    body: clients.map((c, i) => [
-      String(i + 1), c.id, getClientName(c), c.passport || "—",
-      { content: formatCurrency(c.amountDue), styles: { halign: "right" as const } },
-      { content: formatCurrency(c.amountPaid), styles: { halign: "right" as const, textColor: SUCCESS } },
-      c.paymentStatus,
+    head: [[
+      "#", "Client", "Passport", rightHead("Package"),
+      ...(showExtra ? [rightHead("Extra")] : []),
+      ...(showRefund ? [rightHead("Refund")] : []),
+      ...(showDisc ? [rightHead("Discount")] : []),
+      rightHead("Net Due"), rightHead("Paid"), "Status",
+    ]],
+    body: rows.map(({ c, pkg, extra, refund, disc }, i) => [
+      String(i + 1), idName(c.id, getClientName(c)), c.passport || "—", right(num(pkg)),
+      ...(showExtra ? [right(extra ? `+ ${num(extra)}` : "—")] : []),
+      ...(showRefund ? [right(refund ? `− ${num(refund)}` : "—", DANGER)] : []),
+      ...(showDisc ? [right(disc ? `− ${num(disc)}` : "—", SUCCESS)] : []),
+      right(num(c.amountDue), NAVY), right(num(c.amountPaid), SUCCESS), c.paymentStatus,
     ]),
+    columnStyles: cols,
   });
   y = (doc as any).lastAutoTable.finalY + 6;
 
   // Service sections embedded in invoice if any
   y = renderServiceSections(doc, y, [booking]);
 
-  const balance = booking.totalAmount - booking.amountReceived;
-  // Right-aligned totals box
+  // ---- Totals box: Gross → concessions → Net payable → received → balance ----
+  const lines: Array<[string, string, [number, number, number]?]> = [
+    ["Package Total", formatCurrency(money.gross - money.charges)],
+  ];
+  if (money.charges > 0) lines.push(["Extra Charges", `+ ${formatCurrency(money.charges)}`]);
+  if (money.refunds > 0) lines.push(["Refunds", `− ${formatCurrency(money.refunds)}`, DANGER]);
+  if (money.discount > 0) lines.push(["Discount / Concession", `− ${formatCurrency(money.discount)}`, SUCCESS]);
+  const rowH = 6.5;
+  const boxH = (lines.length + 2) * rowH + 3 + 13;
+  y = ensureSpace(doc, y, boxH + 12);
+  const bx = 110, bw = 86;
   doc.setFillColor(...IVORY);
-  doc.rect(110, y, 86, 32, "F");
+  doc.rect(bx, y, bw, boxH, "F");
   doc.setDrawColor(...GOLD);
   doc.setLineWidth(0.4);
-  doc.rect(110, y, 86, 32);
+  doc.rect(bx, y, bw, boxH);
   setSans(doc, "normal");
   doc.setFontSize(9);
-  doc.setTextColor(...INK);
-  doc.text("Total Amount", 114, y + 7);
-  doc.text(formatCurrency(booking.totalAmount), 192, y + 7, { align: "right" });
-  doc.text("Received", 114, y + 14);
-  doc.setTextColor(...SUCCESS);
-  doc.text(formatCurrency(booking.amountReceived), 192, y + 14, { align: "right" });
-  doc.setTextColor(...INK);
+  let ly = y + 6;
+  const put = (label: string, value: string, color: [number, number, number] = INK, bold = false) => {
+    setSans(doc, bold ? "bold" : "normal");
+    doc.setTextColor(...INK);
+    doc.text(label, bx + 4, ly);
+    doc.setTextColor(...color);
+    doc.text(value, bx + bw - 4, ly, { align: "right" });
+    ly += rowH;
+  };
+  lines.forEach(([l, v, c]) => put(l, v, c));
+  // rule + net payable
+  doc.setDrawColor(...GOLD_LT);
+  doc.setLineWidth(0.25);
+  doc.line(bx + 4, ly - 4, bx + bw - 4, ly - 4);
+  put("Net Payable", formatCurrency(money.net), NAVY, true);
+  put("Received", formatCurrency(money.received), SUCCESS);
 
+  const bandY = y + boxH - 13;
   doc.setFillColor(...GOLD);
-  doc.rect(110, y + 19, 86, 13, "F");
+  doc.rect(bx, bandY, bw, 13, "F");
   doc.setTextColor(...WHITE);
   setSerif(doc, "bold");
   doc.setFontSize(11);
-  doc.text("BALANCE DUE", 114, y + 27.5);
-  doc.text(formatCurrency(balance), 192, y + 27.5, { align: "right" });
+  doc.text("BALANCE DUE", bx + 4, bandY + 8.5);
+  doc.text(formatCurrency(money.pending), bx + bw - 4, bandY + 8.5, { align: "right" });
 
   if (agent || supplier) {
     setSans(doc, "italic");
     doc.setFontSize(7.5);
     doc.setTextColor(...MUTED);
-    doc.text(`Agent: ${agent?.name || "Direct"}   ·   Supplier: ${supplier?.companyName || "—"}`, 14, y + 36);
+    doc.text(
+      fit(doc, `Agent: ${agent ? idName(agent.id, agent.name) : "Direct"}   ·   Supplier: ${supplier ? idName(supplier.id, supplier.companyName) : "—"}`, 92),
+      14, y + boxH - 2,
+    );
   }
 
   footer(doc);
-  save(doc, `Avery_Invoice_${booking.headId}.pdf`);
+  save(doc, `Avery_Invoice_${booking.headId}_${slug(leadName)}.pdf`);
 }
 
 // =========================================================================

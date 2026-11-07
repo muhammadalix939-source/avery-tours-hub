@@ -1,6 +1,7 @@
 // Head / Group business economics — single source of truth for the Head Business View card.
 import { getClientName, type Booking, type Client } from "./data";
 import type { LedgerEntry } from "./store";
+import { headCostOf, headSupplierPaid, headSupplierRefundOf, entryTouchesHead, allocatedPurchasesOf, type AllocatedPurchaseRow } from "./allocations";
 
 /** Head name = the lead (first) member of a Head ID, the same convention used by the Business View and statements. */
 export function getHeadName(headId: string, clients: Client[]): string {
@@ -82,6 +83,8 @@ export interface HeadBusiness {
   supplierRemaining: number;
   memberList: HeadBusinessMember[];
   linked: LedgerEntry[];
+  /** Purchases (or shares of split purchases) that make up this head's cost. */
+  allocatedPurchases: AllocatedPurchaseRow[];
 }
 
 /** Flat, disclosed amounts only — no interest, no compounding. */
@@ -93,7 +96,8 @@ export function computeHeadBusiness(
 ): HeadBusiness {
   const members = clients.filter((c) => c.headId === headId);
   const booking = bookings.find((b) => b.headId === headId);
-  const linked = entries.filter((e) => e.headId === headId);
+  // Includes purchases / supplier payments that reach this head only through a Cost Allocation line.
+  const linked = entries.filter((e) => entryTouchesHead(e, headId));
 
   const otherCosts = linked.filter((e) => e.type === "client_charge").reduce((s, e) => s + e.amount, 0);
   const base = booking?.baseAmount ?? booking?.totalAmount ?? members.reduce((s, c) => s + (c.baseDue ?? c.amountDue), 0);
@@ -104,9 +108,9 @@ export function computeHeadBusiness(
   const bookingDiscount = Math.max(0, Number(booking?.discount) || 0);
   const discount = bookingDiscount + linked.filter((e) => e.type === "client_discount").reduce((s, e) => s + e.amount, 0);
   const netReceivable = Math.max(0, totalSale - refunds - discount);
-  const purchaseEntries = linked.filter((e) => e.type === "purchase");
-  const supplierRefunds = linked.filter((e) => e.type === "supplier_refund").reduce((s, e) => s + e.amount, 0);
-  const totalPurchase = Math.max(purchaseEntries.reduce((s, e) => s + e.amount, 0), booking?.totalCost || 0) - supplierRefunds;
+  // Cost the head bears = its allocation lines (legacy single-target entries are adapted 1:1).
+  const supplierRefunds = headSupplierRefundOf(entries, headId);
+  const totalPurchase = Math.max(headCostOf(entries, headId), booking?.totalCost || 0) - supplierRefunds;
   const grossCommission = booking?.commission || 0;
   // A discount settled from the agent's commission is absorbed by the agent (up to the commission); it is
   // already deducted from revenue above, so profit must NOT also gain it back through a smaller commission twice.
@@ -115,19 +119,8 @@ export function computeHeadBusiness(
   const received = linked.filter((e) => e.type === "client_receive").reduce((s, e) => s + e.amount, 0);
 
   // ---- Supplier Paid / Remaining for THIS head's purchases only ----
-  // 1) Payments explicitly tagged to this head (Head ID field on a Supplier Payment entry).
-  const directSupplierPaid = linked.filter((e) => e.type === "supplier_payment").reduce((s, e) => s + e.amount, 0);
-  // 2) This head may share a PNR / batch Group with other heads. Any payment made against
-  //    that group WITHOUT a specific head tag is prorated by this head's share of the group's bill.
-  const groupIds = new Set(purchaseEntries.map((e) => e.groupId).filter(Boolean) as string[]);
-  let proratedSupplierPaid = 0;
-  groupIds.forEach((gid) => {
-    const groupBill = entries.filter((e) => e.type === "purchase" && e.groupId === gid).reduce((s, e) => s + e.amount, 0);
-    const groupUntaggedPaid = entries.filter((e) => e.type === "supplier_payment" && e.groupId === gid && !e.headId).reduce((s, e) => s + e.amount, 0);
-    const thisHeadShare = purchaseEntries.filter((e) => e.groupId === gid).reduce((s, e) => s + e.amount, 0);
-    if (groupBill > 0) proratedSupplierPaid += groupUntaggedPaid * (thisHeadShare / groupBill);
-  });
-  const supplierPaid = Math.round(directSupplierPaid + proratedSupplierPaid);
+  // Direct head tags + this head's pro-rata share of group-tagged supplier money (see allocations.headSupplierPaid).
+  const supplierPaid = headSupplierPaid(entries, headId);
   const supplierRemaining = Math.max(0, Math.round(totalPurchase - supplierPaid));
 
   // ---- Per-member (Members View) breakdown ----
@@ -166,5 +159,6 @@ export function computeHeadBusiness(
     supplierRemaining,
     memberList,
     linked,
+    allocatedPurchases: allocatedPurchasesOf(entries, headId),
   };
 }

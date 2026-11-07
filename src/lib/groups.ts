@@ -3,6 +3,7 @@
 import type { Booking, Client, Supplier } from "./data";
 import { netCommissionOf } from "./data";
 import type { LedgerEntry, PurchaseGroup } from "./store";
+import { paymentAmountForGroup } from "./allocations";
 
 export interface GroupHeadSummary {
   headId: string;
@@ -70,7 +71,7 @@ export function computeGroupStats(
 
   const tagged = data.entries.filter((e) => e.groupId === group.id);
   const purchases = tagged.filter((e) => e.type === "purchase");
-  const payments = tagged.filter((e) => e.type === "supplier_payment");
+  const payments = data.entries.filter((e) => paymentAmountForGroup(e, group.id) > 0);
   const groupExpenses = tagged.filter((e) => e.type === "expense");
   const supplierRefunds = tagged.filter((e) => e.type === "supplier_refund");
   const receipts = data.entries.filter((e) => e.type === "client_receive" && headIds.has(e.headId));
@@ -89,7 +90,7 @@ export function computeGroupStats(
     .filter((e) => e.type === "client_refund" && headIds.has(e.headId))
     .reduce((s, e) => s + e.amount, 0);
   const supplierBill = Math.max(0, purchases.reduce((s, e) => s + e.amount, 0) - supplierRefunds.reduce((s, e) => s + e.amount, 0));
-  const supplierPaid = payments.reduce((s, e) => s + e.amount, 0);
+  const supplierPaid = payments.reduce((s, e) => s + paymentAmountForGroup(e, group.id), 0);
   const commission = linkedBookings.reduce((s, b) => s + netCommissionOf(b), 0);
   const expenses = groupExpenses.reduce((s, e) => s + e.amount, 0);
   const netProfit = revenue - supplierBill - commission - expenses;

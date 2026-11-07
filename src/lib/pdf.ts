@@ -7,6 +7,7 @@ import type {
 } from "./data";
 import type { LedgerEntry } from "./store";
 import { computeBookingMoney, idName } from "./heads";
+import { agentOtherSaleRows } from "./allocations";
 import { AVERY_LOGO_JPEG } from "@/assets/avery-logo";
 
 // =========================================================================
@@ -1300,8 +1301,11 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   const bDate = (b: Booking) => ((b as any).createdAt ? String((b as any).createdAt).slice(0, 10) : b.travelDate);
   const leadName = (h: string) => { const c = clients.find((x) => x.headId === h); return c ? getClientName(c) : "—"; };
 
-  const otherRows = entries.filter((e) => (e.type === "purchase" && e.purchasedFor === "agent" && e.agentId === agent.id) || (e.type === "other_sale" && e.referenceId === agent.id));
-  const otherSaleOf = (e: LedgerEntry) => (e.type === "purchase" ? (e.saleAmount ?? e.amount) : e.amount);
+  const otherSaleRowList = agentOtherSaleRows(entries, agent.id);
+  const rowOf = new Map(otherSaleRowList.map((r) => [r.entry.id, r]));
+  const otherRows = otherSaleRowList.map((r) => r.entry);
+  const otherSaleOf = (e: LedgerEntry) => rowOf.get(e.id)?.sale ?? 0;
+  const otherCostOf = (e: LedgerEntry) => rowOf.get(e.id)?.cost ?? 0;
   const clientReceipts = entries.filter((e) => (e.type === "client_receive" || e.type === "client_refund" || e.type === "client_charge") && e.headId && headIds.has(e.headId));
   const agentReceipts = entries.filter((e) => e.type === "agent_receive" && (e.referenceId === agent.id || e.agentId === agent.id));
   const commissionPaid = entries.filter((e) => e.type === "agent_commission" && e.referenceId === agent.id);
@@ -1334,7 +1338,7 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
   const refunds = pClientTx.filter((e) => e.type === "client_refund").reduce((s, e) => s + e.amount, 0);
   const clientReceived = pClientTx.filter((e) => e.type === "client_receive").reduce((s, e) => s + e.amount, 0);
   const otherSale = pOther.reduce((s, e) => s + otherSaleOf(e), 0);
-  const otherCost = pOther.filter((e) => e.type === "purchase").reduce((s, e) => s + e.amount, 0);
+  const otherCost = pOther.reduce((s, e) => s + otherCostOf(e), 0);
   const agentReceived = pAgentRec.reduce((s, e) => s + e.amount, 0);
   const totalReceived = clientReceived + agentReceived;
   const periodBusiness = netClient + extraCharges - refunds + otherSale;
@@ -1422,7 +1426,10 @@ export async function generateAgentReport(agent: Agent, entries: LedgerEntry[], 
           } else {
             desc = [d.description, e.chargeCategory, e.note].filter(Boolean).join(" · ") || "Service";
           }
-          return [fmtDate(e.date), e.id, e.forClientName || "—", desc, money(otherSaleOf(e))];
+          const r = rowOf.get(e.id);
+          // Split purchase: say plainly which share of the supplier bill this line is.
+          if (r && e.allocations && e.allocations.length > 1) desc += `\nShare of ${e.id} (cost ${formatCurrency(r.cost)} of ${formatCurrency(e.amount)})`;
+          return [fmtDate(e.date), e.id, r?.line?.forClientName || e.forClientName || "—", desc, money(otherSaleOf(e))];
         }),
         foot: footRow(`Total ${k}`, 4, tot),
       });
@@ -1692,7 +1699,7 @@ export async function generatePaymentHistory(
     ];
   });
   if (!body.length) {
-    body.push([{ content: "No payments have been recorded yet.", colSpan: 6, styles: { halign: "center" as const, fontStyle: "italic" as const, textColor: MUTED, cellPadding: 6 } }]);
+    body.push([{ content: "No payments have been recorded yet.", colSpan: 6, styles: { halign: "center" as const, textColor: MUTED, cellPadding: 6 } }]);
   }
   brandTable(doc, {
     startY: y + 1,

@@ -4,8 +4,44 @@ import { toast } from "sonner";
 import type { Client, Booking, Agent, Supplier, HotelService, FlightService, TransportService, VisaService, OtherService, ChecklistItem, Drawer } from "./data";
 import { netCommissionOf, mockClients, mockBookings, mockAgents, mockSuppliers, mockMonthlyData as defaultMonthlyData, generateId } from "./data";
 import { defaultChecklist } from "./checklist";
+import { entriesAllocatingTo } from "./allocations";
 import { getPKTDate } from "./date-utils";
 import { pushFullStateToFirestore, fetchCollectionFromFirestore, auth } from "./firebase";
+
+// ---------- Cost Allocation (purchases + supplier payments) ----------
+export type AllocationTarget = "head" | "agent" | "office";
+
+/** One line of a split purchase. Lines are authoritative when present; sum(amount) === entry.amount. */
+export interface CostAllocation {
+  /** stable id inside the entry ("A1", "A2" …) — not a global ledger id */
+  id: string;
+  target: AllocationTarget;
+  /** target "head": the client Head */
+  headId?: string;
+  /** target "head": optional specific member; empty = whole head */
+  clientId?: string;
+  /** target "agent": the agent id */
+  agentId?: string;
+  /** Cost share in whole PKR */
+  amount: number;
+  /** target "agent": price billed to the agent (Other Sale). Defaults to `amount`. */
+  saleAmount?: number;
+  /** target "agent": end passenger / client name */
+  forClientName?: string;
+  /** Manual mode: this line is not touched by equal re-split / auto-balance */
+  locked?: boolean;
+  /** target "head": also bill this share to the client as a linked `client_charge` (default off) */
+  billClient?: boolean;
+}
+
+export interface PaymentAllocation {
+  id: string;
+  target: "head" | "group" | "agent" | "unallocated";
+  headId?: string;
+  groupId?: string;
+  agentId?: string;
+  amount: number;
+}
 
 export interface LedgerEntry {
   id: string;
@@ -80,7 +116,15 @@ export interface LedgerEntry {
   giftCategory?: "Gift" | "Expense";
   /** Voucher / ticket / confirmation number printed on the supplier's document. */
   voucherNo?: string;
-  /** Shared Cost Allocation: which specific members (within headId) share this purchase. */
+  /** Purchase only: who bears this purchase (authoritative when present). Sum(amount) === entry.amount. */
+  allocations?: CostAllocation[];
+  /** How the lines were produced; informational — lines are authoritative. */
+  allocationMode?: "equal" | "manual";
+  /** supplier_payment only: how this payment is tagged. Sum(amount) === entry.amount. */
+  paymentAllocations?: PaymentAllocation[];
+  /** System-managed `client_charge` row generated from a purchase allocation line ("Also bill client"). Holds the purchase id. */
+  allocationOf?: string;
+  /** (legacy, never written any more) Shared Cost Allocation: which specific members (within headId) share this purchase. */
   sharedClientIds?: string[];
   /** Equal = amount split evenly across sharedClientIds. Manual = clientSplits gives each person's share. */
   splitMethod?: "equal" | "manual";
@@ -549,6 +593,30 @@ function resyncSuppliers() {
 /** Recompute everything that is derived. Cheap for CRM-sized data. */
 function resyncDerived() { resyncSuppliers(); resyncAgents(); }
 
+/** "Also bill client" lines: keep ONE system-managed client_charge per flagged head line of a purchase
+ *  (allocationOf = purchase id). Regenerated whenever the purchase changes; removed with it. Returns heads touched. */
+function syncAllocationCharges(purchaseId: string): string[] {
+  const touched = new Set<string>();
+  entries.filter((e) => e.allocationOf === purchaseId && e.headId).forEach((e) => touched.add(e.headId));
+  entries = entries.filter((e) => e.allocationOf !== purchaseId);
+  const p = entries.find((e) => e.id === purchaseId);
+  if (p && p.type === "purchase" && p.allocations) {
+    p.allocations.forEach((l) => {
+      if (l.target !== "head" || !l.billClient || !l.headId || !(l.amount > 0)) return;
+      const eid = `E${String(nextEntryNum++).padStart(3, "0")}`;
+      entries = [...entries, {
+        id: eid, date: p.date, type: "client_charge", headId: l.headId, referenceId: l.headId,
+        referenceName: `Shared ${p.serviceCategory || "purchase"} cost`, amount: l.amount,
+        note: `Linked to ${p.id}`, chargeCategory: `Shared ${p.serviceCategory || "Purchase"} Cost`,
+        ...(l.clientId ? { clientId: l.clientId } : {}), allocationOf: p.id,
+        createdAt: new Date().toLocaleString("en-PK", { timeZone: "Asia/Karachi" }),
+      }];
+      touched.add(l.headId);
+    });
+  }
+  return [...touched];
+}
+
 /** Move a booking's package total by `delta` (a member joined / left / was re-priced). Never below zero. */
 function adjustBookingBase(headId: string | undefined, delta: number) {
   if (!headId || !delta) return;
@@ -995,6 +1063,8 @@ export function useStore() {
       registerUndoableAction(`Agent ${target?.name || id} updated`, () => restoreStateSnapshot(snap));
     },
     deleteAgent: (id: string) => {
+      const used = entriesAllocatingTo(entries, { agentId: id });
+      if (used.length) { toast.error(`Agent ${id} is used in cost allocation of ${used.map((e) => e.id).slice(0, 6).join(", ")}${used.length > 6 ? "…" : ""}. Edit or delete those entries first.`); return; }
       const snap = takeStateSnapshot();
       const target = agents.find((a) => a.id === id);
       agents = agents.filter((a) => a.id !== id);
@@ -1076,6 +1146,8 @@ export function useStore() {
       const snap = takeStateSnapshot();
       const b = bookings.find((x) => x.id === id);
       if (!b) { notify(); return; }
+      const used = entriesAllocatingTo(entries, { headId: b.headId }).filter((e) => !e.allocationOf);
+      if (used.length) { toast.error(`${b.headId} is used in cost allocation of ${used.map((e) => e.id).slice(0, 6).join(", ")}${used.length > 6 ? "…" : ""}. Edit or delete those entries first.`); return; }
       // Cascade: delete clients under this head + related ledger entries
       const headId = b.headId;
       clients = clients.filter((c) => c.headId !== headId);
@@ -1092,18 +1164,21 @@ export function useStore() {
       const id = `E${String(nextEntryNum++).padStart(3, "0")}`;
       const entry = { ...data, id, createdAt: new Date().toLocaleString("en-PK", { timeZone: "Asia/Karachi" }) };
       entries = [...entries, entry];
+      const linkedHeads = data.type === "purchase" ? syncAllocationCharges(id) : [];
       resyncFromEntries({
         supplierIds: (data.type === "purchase" || data.type === "supplier_payment" || data.type === "supplier_refund" || data.type === "supplier_discount") ? [data.referenceId] : [],
         agentIds: data.type === "agent_commission" ? [data.referenceId] : [],
-        headIds: (data.type === "client_receive" || data.type === "client_charge" || data.type === "client_refund" || data.type === "client_discount") && data.headId ? [data.headId] : [],
+        headIds: [...((data.type === "client_receive" || data.type === "client_charge" || data.type === "client_refund" || data.type === "client_discount") && data.headId ? [data.headId] : []), ...linkedHeads],
       });
       notify();
-      registerUndoableAction(`Entry ${id} (${data.type.replace(/_/g, " ")}) recorded`, () => restoreStateSnapshot(snap));
+      const parties = data.type === "purchase" && data.allocations && data.allocations.length > 1 ? ` — split across ${data.allocations.length} parties` : "";
+      registerUndoableAction(`Entry ${id} (${data.type.replace(/_/g, " ")}) recorded${parties}`, () => restoreStateSnapshot(snap));
       return id;
     },
     updateEntry: (id: string, data: Partial<LedgerEntry>) => {
-      const snap = takeStateSnapshot();
       const before = entries.find((e) => e.id === id);
+      if (before?.allocationOf) { toast.error(`${id} is generated from ${before.allocationOf} — edit that purchase instead.`); return; }
+      const snap = takeStateSnapshot();
       entries = entries.map((e) => (e.id === id ? { ...e, ...data } : e));
       const after = entries.find((e) => e.id === id);
       // Collect every ref possibly affected (old + new — reference or type may have changed)
@@ -1116,19 +1191,23 @@ export function useStore() {
         if (e.type === "agent_commission") { if (e.referenceId) agentIds.add(e.referenceId); }
         if (e.type === "client_receive" || e.type === "client_charge" || e.type === "client_refund" || e.type === "client_discount") { if (e.headId) headIds.add(e.headId); }
       });
+      if (before?.type === "purchase" || after?.type === "purchase") syncAllocationCharges(id).forEach((h) => headIds.add(h));
       resyncFromEntries({ supplierIds: [...supplierIds], agentIds: [...agentIds], headIds: [...headIds] });
       notify();
       registerUndoableAction(`Entry ${id} updated`, () => restoreStateSnapshot(snap));
     },
     deleteEntry: (id: string) => {
-      const snap = takeStateSnapshot();
       const e = entries.find((x) => x.id === id);
+      if (e?.allocationOf) { toast.error(`${id} is generated from ${e.allocationOf} — delete or edit that purchase instead.`); return; }
+      const snap = takeStateSnapshot();
       entries = entries.filter((x) => x.id !== id);
       if (e) {
+        // A purchase takes its allocation lines AND its generated "billed to client" charges with it.
+        const linkedHeads = e.type === "purchase" ? syncAllocationCharges(id) : [];
         resyncFromEntries({
           supplierIds: (e.type === "purchase" || e.type === "supplier_payment" || e.type === "supplier_refund" || e.type === "supplier_discount") && e.referenceId ? [e.referenceId] : [],
           agentIds: e.type === "agent_commission" && e.referenceId ? [e.referenceId] : [],
-          headIds: (e.type === "client_receive" || e.type === "client_charge" || e.type === "client_refund" || e.type === "client_discount") && e.headId ? [e.headId] : [],
+          headIds: [...((e.type === "client_receive" || e.type === "client_charge" || e.type === "client_refund" || e.type === "client_discount") && e.headId ? [e.headId] : []), ...linkedHeads],
         });
       }
       notify();

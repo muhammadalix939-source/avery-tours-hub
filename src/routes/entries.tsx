@@ -21,6 +21,9 @@ import { toast } from "sonner";
 import { getPKTDate } from "@/lib/date-utils";
 import { generatePaymentReceipt } from "@/lib/pdf";
 import { useMemo, useState } from "react";
+import AllocationEditor, { type AllocRow, newRowId, toCostAllocations, toPaymentAllocations, rowsFromCost, rowsFromPayment } from "@/components/AllocationEditor";
+import { validateAllocations, validatePaymentAllocations, purchaseAllocations, paymentAllocations, isSplitEntry, headCostOf, headSupplierPaid, headSupplierRefundOf } from "@/lib/allocations";
+import { getHeadName, idName } from "@/lib/heads";
 
 export const Route = createFileRoute("/entries")({
   component: EntriesPage,
@@ -193,7 +196,10 @@ function EntriesPage() {
   // Extra charge / refund metadata
   const [extra, setExtra] = useState({ clientId: "", chargeCategory: "", refundOf: "", refundReason: "" });
   // Purchase allocation: who this supplier purchase was bought for
-  const [pf, setPf] = useState({ for: "" as "" | "client" | "agent", agentId: "", clientName: "", saleAmount: "" });
+  const [pf, setPf] = useState({ for: "" as "" | "client" | "agent" | "split", agentId: "", clientName: "", saleAmount: "" });
+  // Cost Allocation: split purchase (cost → heads / agents / office) and tagged supplier payment (money → heads / groups / agents)
+  const [alloc, setAlloc] = useState<{ mode: "equal" | "manual"; rows: AllocRow[] }>({ mode: "equal", rows: [] });
+  const [paySplit, setPaySplit] = useState<{ on: boolean; mode: "equal" | "manual"; rows: AllocRow[] }>({ on: false, mode: "manual", rows: [] });
   // Group management (PNR / batch) — for purchase entries
   const [groupMode, setGroupMode] = useState<"none" | "existing" | "new">("none");
   const [groupId, setGroupId] = useState<string>("");
@@ -336,7 +342,57 @@ function EntriesPage() {
     });
   }, [store.entries, store.accounts, typeFilter, methodFilter, accountFilter, searchQuery, sortKey]);
 
+  // ---- Cost Allocation: option lists + live validation (Save is blocked until the lines add up) ----
+  const allocHeads = useMemo(
+    () => Array.from(new Set(store.bookings.map((b) => b.headId))).map((h) => ({ value: h, label: idName(h, getHeadName(h, store.clients)), hint: store.bookings.find((b) => b.headId === h)?.packageType })),
+    [store.bookings, store.clients],
+  );
+  const allocAgents = useMemo(() => store.agents.map((a) => ({ value: a.id, label: idName(a.id, a.name) })), [store.agents]);
+  const allocGroups = useMemo(() => store.groups.map((g) => ({ value: g.id, label: idName(g.id, g.name), hint: [g.category, g.pnr && `PNR ${g.pnr}`].filter(Boolean).join(" · ") })), [store.groups]);
+  const membersOfHead = (h: string) => store.clients.filter((c) => c.headId === h).map((c) => ({ value: c.id, label: idName(c.id, getClientName(c)) }));
+  const isSplitPurchase = form.type === "purchase" && pf.for === "split";
+  const isSplitPayment = form.type === "supplier_payment" && paySplit.on;
+  const splitTotal = Number(form.amount) || 0;
+  const splitCheck = useMemo(() => {
+    if (isSplitPurchase) {
+      if (splitTotal <= 0) return { ok: false, errors: ["Enter the purchase amount to split it."], remaining: 0 };
+      return validateAllocations(toCostAllocations(alloc.rows), splitTotal, {
+        heads: new Set(allocHeads.map((h) => h.value)), agents: new Set(allocAgents.map((a) => a.value)),
+        membersOf: (h) => new Set(store.clients.filter((c) => c.headId === h).map((c) => c.id)),
+      });
+    }
+    if (isSplitPayment) {
+      if (splitTotal <= 0) return { ok: false, errors: ["Enter the payment amount to tag it."], remaining: 0 };
+      return validatePaymentAllocations(toPaymentAllocations(paySplit.rows), splitTotal, {
+        heads: new Set(allocHeads.map((h) => h.value)), agents: new Set(allocAgents.map((a) => a.value)), groups: new Set(allocGroups.map((g) => g.value)),
+      });
+    }
+    return null;
+  }, [isSplitPurchase, isSplitPayment, splitTotal, alloc.rows, paySplit.rows, allocHeads, allocAgents, allocGroups, store.clients]);
+  const splitBlocked = !!splitCheck && !splitCheck.ok;
+  /** Amber, non-blocking: a head tagged with more supplier money than it still owes (advances are legitimate). */
+  const payWarn = (r: AllocRow): string | null => {
+    if (r.target !== "head" || !r.headId) return null;
+    const others = store.entries.filter((e) => e.id !== selected?.id);
+    const owed = headCostOf(others, r.headId) - headSupplierRefundOf(others, r.headId) - headSupplierPaid(others, r.headId);
+    return r.amount > Math.max(0, owed) ? `${r.headId} only has ${formatCurrency(Math.max(0, owed))} still owed to suppliers — this is treated as an advance.` : null;
+  };
+  /** Fields written to the entry for the allocation feature (and the legacy fields they replace). */
+  function allocFields(): Partial<LedgerEntry> {
+    if (isSplitPurchase) {
+      return { allocations: toCostAllocations(alloc.rows), allocationMode: alloc.mode, purchasedFor: undefined, headId: "", agentId: undefined, clientId: undefined, forClientName: undefined, saleAmount: undefined };
+    }
+    if (isSplitPayment) {
+      const lines = toPaymentAllocations(paySplit.rows);
+      const groups = lines.filter((l) => l.target === "group");
+      return { paymentAllocations: lines, headId: "", agentId: undefined, groupId: groups.length === 1 ? groups[0].groupId : undefined };
+    }
+    return { allocations: undefined, allocationMode: undefined, paymentAllocations: undefined };
+  }
+  function resetAlloc() { setAlloc({ mode: "equal", rows: [] }); setPaySplit({ on: false, mode: "manual", rows: [] }); }
+
   function validatePay(): boolean {
+    if (splitBlocked) { toast.error(splitCheck?.errors[0] || "Fix the allocation lines first"); return false; }
     if (!MONEY_TYPES.includes(form.type)) return true;
     if (!(Number(form.amount) > 0)) { toast.error("Enter an amount"); return false; }
     if (form.type === "jv") {
@@ -377,7 +433,7 @@ function EntriesPage() {
       serviceCategory: serviceCategory || undefined,
       purchaseDetails: form.type === "purchase" ? buildDetailsPayload(serviceCategory, details) : undefined,
       groupId: groupTaggable ? finalGroupId : undefined,
-      purchasedFor: form.type === "purchase" ? (pf.for || undefined) : undefined,
+      purchasedFor: form.type === "purchase" && pf.for !== "split" ? (pf.for || undefined) : undefined,
       forClientName: form.type === "purchase" && pf.for === "agent" ? (pf.clientName || undefined) : undefined,
       saleAmount: form.type === "purchase" && pf.for === "agent" && pf.saleAmount ? Number(pf.saleAmount) : undefined,
       agentId: form.type === "purchase" && pf.for === "agent" ? (pf.agentId || undefined) : (refs.agentId || undefined),
@@ -399,9 +455,11 @@ function EntriesPage() {
       jvType: form.type === "jv" ? jv.jvType : undefined,
       toAccountId: form.type === "jv" && jv.jvType === "account_transfer" ? (jv.toAccountId || undefined) : undefined,
       targetBalance: form.type === "jv" && jv.targetBalance ? Number(jv.targetBalance) : undefined,
+      ...allocFields(),
     });
     setForm({ date: "", type: "client_receive", headId: "", referenceId: "", referenceName: "", amount: "", note: "" });
     setPf({ for: "", agentId: "", clientName: "", saleAmount: "" });
+    resetAlloc();
     setServiceCategory("");
     setDetails(emptyDetails);
     setExtra({ clientId: "", chargeCategory: "", refundOf: "", refundReason: "" });
@@ -435,7 +493,7 @@ function EntriesPage() {
       serviceCategory: serviceCategory || undefined,
       purchaseDetails: form.type === "purchase" ? buildDetailsPayload(serviceCategory, details) : undefined,
       groupId: groupTaggable ? finalGroupId : undefined,
-      purchasedFor: form.type === "purchase" ? (pf.for || undefined) : undefined,
+      purchasedFor: form.type === "purchase" && pf.for !== "split" ? (pf.for || undefined) : undefined,
       forClientName: form.type === "purchase" && pf.for === "agent" ? (pf.clientName || undefined) : undefined,
       saleAmount: form.type === "purchase" && pf.for === "agent" && pf.saleAmount ? Number(pf.saleAmount) : undefined,
       agentId: form.type === "purchase" && pf.for === "agent" ? (pf.agentId || undefined) : (refs.agentId || undefined),
@@ -457,6 +515,7 @@ function EntriesPage() {
       jvType: form.type === "jv" ? jv.jvType : undefined,
       toAccountId: form.type === "jv" && jv.jvType === "account_transfer" ? (jv.toAccountId || undefined) : undefined,
       targetBalance: form.type === "jv" && jv.targetBalance ? Number(jv.targetBalance) : undefined,
+      ...allocFields(),
     });
     setEditOpen(false);
   }
@@ -474,7 +533,10 @@ function EntriesPage() {
       targetBalance: e.targetBalance != null ? String(e.targetBalance) : "",
       direction: e.direction || (e.type === "jv" ? "out" : entryDirection(e.type)),
     });
-    setPf({ for: e.purchasedFor || "", agentId: e.purchasedFor === "agent" ? e.agentId || "" : "", clientName: e.forClientName || "", saleAmount: e.saleAmount ? String(e.saleAmount) : "" });
+    const splitNow = e.type === "purchase" && !!e.allocations && e.allocations.length > 0;
+    setPf({ for: splitNow ? "split" : (e.purchasedFor || ""), agentId: e.purchasedFor === "agent" ? e.agentId || "" : "", clientName: e.forClientName || "", saleAmount: e.saleAmount ? String(e.saleAmount) : "" });
+    setAlloc(splitNow ? { mode: e.allocationMode || "manual", rows: rowsFromCost(e.allocations || []) } : { mode: "equal", rows: [] });
+    setPaySplit(e.type === "supplier_payment" && e.paymentAllocations && e.paymentAllocations.length > 0 ? { on: true, mode: "manual", rows: rowsFromPayment(e.paymentAllocations) } : { on: false, mode: "manual", rows: [] });
     if (e.groupId) { setGroupMode("existing"); setGroupId(e.groupId); } else { setGroupMode("none"); setGroupId(""); }
     setNewGroup({ name: "", pnr: "", flightNumber: "", date: "", description: "", totalPax: "" });
     const d = e.purchaseDetails || {};
@@ -1013,6 +1075,27 @@ function EntriesPage() {
           {form.type === "supplier_payment" && (
             <div className="space-y-3 rounded-lg border border-primary/40 bg-primary/5 p-3">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-primary">Payment Reference (who / where it belongs)</p>
+              <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-accent/10 p-1">
+                {([[false, "Single tag (as today)"], [true, "Split across heads · groups · agents"]] as const).map(([on, l]) => (
+                  <button key={String(on)} type="button" onClick={() => {
+                    if (on && paySplit.rows.length === 0) {
+                      const seed: AllocRow[] = groupMode === "existing" && groupId ? [{ id: newRowId(), target: "group", groupId, amount: 0 }]
+                        : form.headId ? [{ id: newRowId(), target: "head", headId: form.headId, amount: 0 }]
+                        : refs.agentId ? [{ id: newRowId(), target: "agent", agentId: refs.agentId, amount: 0 }] : [{ id: newRowId(), target: "unallocated", amount: 0 }];
+                      setPaySplit({ on: true, mode: "manual", rows: seed });
+                    } else setPaySplit((p) => ({ ...p, on }));
+                  }}
+                    className={`min-h-8 rounded px-2 py-1.5 text-[11px] font-semibold ${paySplit.on === on ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{l}</button>
+                ))}
+              </div>
+              {paySplit.on && (
+                <AllocationEditor kind="payment" total={splitTotal} rows={paySplit.rows} onRows={(rows) => setPaySplit((p) => ({ ...p, rows }))}
+                  allocMode={paySplit.mode} onAllocMode={(mode) => setPaySplit((p) => ({ ...p, mode }))}
+                  heads={allocHeads} agents={allocAgents} groups={allocGroups} membersOf={membersOfHead}
+                  errors={splitCheck?.errors || []} remaining={splitCheck?.remaining ?? 0} warn={payWarn} />
+              )}
+              {!paySplit.on && (
+              <>
               <div><Label className="text-[10px]">Group / PNR (optional)</Label>
                 <SearchableSelect
                   value={groupMode === "existing" ? groupId : ""}
@@ -1063,6 +1146,8 @@ function EntriesPage() {
                   />
                 </div>
               </div>
+              </>
+              )}
               <div><Label className="text-[10px]">Paid By / Handed Over By</Label>
                 <Input value={refs.paidBy} onChange={(e) => setRefs({ ...refs, paidBy: e.target.value })} placeholder="Office cash / Bank transfer / Agent Ahmed" className="bg-accent/20 border-border mt-1 h-8 text-xs" />
               </div>
@@ -1072,9 +1157,17 @@ function EntriesPage() {
           {form.type === "purchase" && (
             <div className="space-y-3 rounded-lg border border-primary/40 bg-primary/5 p-3">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-primary">Purchase For (whose account)</p>
-              <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-accent/10 p-1">
-                {([["", "Office / Stock"], ["client", "Client"], ["agent", "Agent"]] as const).map(([v, l]) => (
-                  <button key={v} type="button" onClick={() => { setPf({ ...pf, for: v }); if (v !== "client") setForm((f) => ({ ...f, headId: v === "agent" ? "" : f.headId })); }}
+              <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-accent/10 p-1 sm:grid-cols-4">
+                {([["", "Office / Stock"], ["client", "One client"], ["agent", "One agent"], ["split", "Split"]] as const).map(([v, l]) => (
+                  <button key={v} type="button" onClick={() => {
+                    if (v === "split" && alloc.rows.length === 0) {
+                      // seed the table from whatever single target was already chosen
+                      const seed: AllocRow[] = pf.for === "client" && form.headId ? [{ id: newRowId(), target: "head", headId: form.headId, amount: 0, ...(extra.clientId ? { clientId: extra.clientId } : {}) }]
+                        : pf.for === "agent" && pf.agentId ? [{ id: newRowId(), target: "agent", agentId: pf.agentId, amount: 0 }] : [];
+                      setAlloc({ mode: "equal", rows: seed });
+                    }
+                    setPf({ ...pf, for: v }); if (v !== "client") setForm((f) => ({ ...f, headId: v === "agent" || v === "split" ? "" : f.headId }));
+                  }}
                     className={`rounded px-2 py-1.5 text-[11px] font-semibold ${pf.for === v ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>{l}</button>
                 ))}
               </div>
@@ -1113,6 +1206,12 @@ function EntriesPage() {
                     </div>); })()}
                   <p className="text-[10px] text-muted-foreground">Added to the agent's <b>Other Sale</b> and his Business Ledger receivable.</p>
                 </>
+              )}
+              {pf.for === "split" && (
+                <AllocationEditor kind="purchase" total={splitTotal} rows={alloc.rows} onRows={(rows) => setAlloc((a) => ({ ...a, rows }))}
+                  allocMode={alloc.mode} onAllocMode={(mode) => setAlloc((a) => ({ ...a, mode }))}
+                  heads={allocHeads} agents={allocAgents} membersOf={membersOfHead}
+                  errors={splitCheck?.errors || []} remaining={splitCheck?.remaining ?? 0} />
               )}
             </div>
           )}
@@ -1943,14 +2042,14 @@ function EntriesPage() {
         actions={
           <Dialog open={addOpen} onOpenChange={setAddOpen}>
             <DialogTrigger asChild>
-              <Button className="gap-2" onClick={() => { setForm({ date: getPKTDate(), type: "client_receive", headId: "", referenceId: "", referenceName: "", amount: "", note: "" }); setDetails(emptyDetails); setServiceCategory(""); setAutoTotal(true); setExtra({ clientId: "", chargeCategory: "", refundOf: "", refundReason: "" }); setGroupMode("none"); setGroupId(""); }}>
+              <Button className="gap-2" onClick={() => { setForm({ date: getPKTDate(), type: "client_receive", headId: "", referenceId: "", referenceName: "", amount: "", note: "" }); setDetails(emptyDetails); setServiceCategory(""); setAutoTotal(true); setExtra({ clientId: "", chargeCategory: "", refundOf: "", refundReason: "" }); setGroupMode("none"); setGroupId(""); setPf({ for: "", agentId: "", clientName: "", saleAmount: "" }); resetAlloc(); }}>
                 <Plus className="h-4 w-4" /> New Entry
               </Button>
             </DialogTrigger>
             <DialogContent className="bg-card border-border max-h-[90vh] overflow-y-auto">
               <DialogHeader><DialogTitle>Add New Entry</DialogTitle></DialogHeader>
               {formFields}
-              <Button onClick={handleAdd} className="w-full">Submit Entry</Button>
+              <Button onClick={handleAdd} disabled={splitBlocked} className="w-full">Submit Entry</Button>
             </DialogContent>
           </Dialog>
         }
@@ -2145,7 +2244,20 @@ function EntriesPage() {
                         {typeLabels[e.type]}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-muted-foreground text-xs">{e.headId || "—"}</td>
+                    <td className="px-4 py-3 text-muted-foreground text-xs">
+                      {(() => {
+                        const lines = e.type === "purchase" ? purchaseAllocations(e) : e.type === "supplier_payment" ? paymentAllocations(e) : [];
+                        const split = e.type === "purchase" ? isSplitEntry(e) : !!e.paymentAllocations && e.paymentAllocations.length > 1;
+                        if (split) {
+                          const tip = lines.map((l) => {
+                            const who = "headId" in l && l.headId ? idName(l.headId, getHeadName(l.headId, store.clients)) : "agentId" in l && l.agentId ? idName(l.agentId, store.agents.find((a) => a.id === l.agentId)?.name) : "groupId" in l && l.groupId ? l.groupId : "Office / unallocated";
+                            return `${who}: ${formatCurrency(l.amount)}`;
+                          }).join("\n");
+                          return <span title={tip} className="inline-flex items-center rounded-full border border-primary/50 px-2 py-0.5 text-[10px] font-semibold text-primary">Split ×{lines.length}</span>;
+                        }
+                        return e.headId ? (<><div className="font-medium text-foreground/80">{e.headId}</div><div className="max-w-[140px] truncate" title={getHeadName(e.headId, store.clients)}>{getHeadName(e.headId, store.clients)}</div></>) : "—";
+                      })()}
+                    </td>
                     <td className="px-4 py-3">
                       <p className="text-sm font-medium">{e.referenceName || (isJv ? "Journal Voucher" : "—")}</p>
                       <p className="text-xs text-muted-foreground">{e.referenceId}</p>
@@ -2248,8 +2360,14 @@ function EntriesPage() {
                     <td className="px-4 py-3">
                       <div className="flex gap-1">
                         <button onClick={() => generatePaymentReceipt(e)} className="rounded p-1 hover:bg-accent" title="Download Receipt"><Download className="h-3.5 w-3.5 text-success" /></button>
-                        <button onClick={() => openEdit(e)} className="rounded p-1 hover:bg-accent"><Pencil className="h-3.5 w-3.5 text-warning" /></button>
-                        <button onClick={() => store.deleteEntry(e.id)} className="rounded p-1 hover:bg-accent"><Trash2 className="h-3.5 w-3.5 text-destructive" /></button>
+                        {e.allocationOf ? (
+                          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground" title="Managed automatically — edit the purchase instead">Linked to {e.allocationOf}</span>
+                        ) : (
+                          <>
+                            <button onClick={() => openEdit(e)} className="rounded p-1 hover:bg-accent"><Pencil className="h-3.5 w-3.5 text-warning" /></button>
+                            <button onClick={() => store.deleteEntry(e.id)} className="rounded p-1 hover:bg-accent"><Trash2 className="h-3.5 w-3.5 text-destructive" /></button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -2264,7 +2382,7 @@ function EntriesPage() {
         <DialogContent className="bg-card border-border max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Edit Entry — {selected?.id}</DialogTitle></DialogHeader>
           {formFields}
-          <Button onClick={handleEdit} className="w-full">Save Changes</Button>
+          <Button onClick={handleEdit} disabled={splitBlocked} className="w-full">Save Changes</Button>
         </DialogContent>
       </Dialog>
     </div>

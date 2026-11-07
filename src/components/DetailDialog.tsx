@@ -7,6 +7,7 @@ import { formatCurrency, getClientName, netCommissionOf } from "@/lib/data";
 import type { Client, Booking, Agent, Supplier } from "@/lib/data";
 import type { LedgerEntry } from "@/lib/store";
 import { idName, getHeadName } from "@/lib/heads";
+import { agentOtherSaleRows, type OtherSaleRow } from "@/lib/allocations";
 import { generateClientStatement, generateSupplierLedger, generateAgentReport, generatePaymentHistory } from "@/lib/pdf";
 import { formatCurrency as fc } from "@/lib/data";
 import { useState } from "react";
@@ -74,9 +75,9 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
   function getAgentStats(a: Agent) {
     const agentBookings = allBookings.filter((b) => b.agentId === a.id);
     const agentClients = allClients.filter((c) => agentBookings.some((b) => b.headId === c.headId));
-    const otherSaleRows = entries.filter((e) => (e.type === "purchase" && e.purchasedFor === "agent" && e.agentId === a.id) || (e.type === "other_sale" && e.referenceId === a.id));
-    const otherSaleTotal = otherSaleRows.reduce((s, e) => s + (e.type === "purchase" ? (e.saleAmount ?? e.amount) : e.amount), 0);
-    const otherSaleCost = otherSaleRows.filter((e) => e.type === "purchase").reduce((s, e) => s + e.amount, 0);
+    const otherSaleRows = agentOtherSaleRows(entries, a.id);
+    const otherSaleTotal = otherSaleRows.reduce((s, r) => s + r.sale, 0);
+    const otherSaleCost = otherSaleRows.reduce((s, r) => s + r.cost, 0);
     const totalSales = agentBookings.reduce((s, b) => s + b.totalAmount, 0) + (a.openingSales || 0) + otherSaleTotal;
     const totalCommission = agentBookings.reduce((s, b) => s + netCommissionOf(b), 0) + (a.openingCommission || 0);
     const paidCommission = entries.filter((e) => e.type === "agent_commission" && e.referenceId === a.id).reduce((s, e) => s + e.amount, 0) + (a.openingPaidCommission || 0);
@@ -227,14 +228,16 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
                 </div>
                 <div className="rounded-lg border border-border/50 p-3 space-y-2">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Other Sale Entries</p>
-                  {stats.otherSaleRows.map((e) => {
-                    const sale = e.type === "purchase" ? (e.saleAmount ?? e.amount) : e.amount;
-                    const cost = e.type === "purchase" ? e.amount : 0;
+                  {stats.otherSaleRows.map((r) => {
+                    const e = r.entry;
+                    const { sale, cost } = r;
+                    const split = !!e.allocations && e.allocations.length > 1;
                     return (
-                      <div key={e.id} className="flex items-center justify-between rounded bg-accent/20 px-3 py-2">
+                      <div key={`${e.id}-${r.line?.id || "x"}`} className="flex items-center justify-between rounded bg-accent/20 px-3 py-2">
                         <div>
-                          <p className="text-xs font-medium">{e.forClientName || e.note || e.referenceName}</p>
+                          <p className="text-xs font-medium">{r.line?.forClientName || e.forClientName || e.note || e.referenceName}</p>
                           <p className="text-[10px] text-muted-foreground">{[e.date, e.serviceCategory, e.type === "purchase" ? `Supplier: ${e.referenceName}` : "Direct"].filter(Boolean).join(" · ")}</p>
+                          {split && <p className="text-[10px] italic text-muted-foreground">Share of {e.id} ({formatCurrency(cost)} of {formatCurrency(e.amount)} cost)</p>}
                         </div>
                         <div className="text-right text-[10px]">
                           <p>Sale: <span className="font-semibold text-primary">{formatCurrency(sale)}</span></p>
@@ -441,7 +444,7 @@ function renderClient(c: Client) {
   );
 }
 
-function renderAgentFull(a: Agent, stats: { agentBookings: any[]; agentClients: Client[]; totalSales: number; totalCommission: number; paidCommission: number; payable: number; received: number; netReceivable: number; outstanding: number }, onViewClients: () => void, onViewBusiness: () => void, onViewOtherSale?: () => void) {
+function renderAgentFull(a: Agent, stats: { agentBookings: any[]; agentClients: Client[]; totalSales: number; totalCommission: number; paidCommission: number; payable: number; received: number; netReceivable: number; outstanding: number; otherSaleRows: OtherSaleRow[] }, onViewClients: () => void, onViewBusiness: () => void, onViewOtherSale?: () => void) {
   return (
     <>
       <Row label="Agent ID" value={a.id} />
@@ -463,7 +466,7 @@ function renderAgentFull(a: Agent, stats: { agentBookings: any[]; agentClients: 
         <StatCard label="Received" value={formatCurrency(stats.received)} color="text-success" />
         <StatCard label="Remaining" value={formatCurrency(stats.outstanding)} color="text-destructive" />
       </div>
-      <AgentServices bookings={stats.agentBookings} otherRows={(stats as any).otherSaleRows || []} />
+      <AgentServices bookings={stats.agentBookings} otherRows={stats.otherSaleRows} />
 
       <div className="space-y-2">
         <Button onClick={onViewClients} variant="outline" className="w-full gap-2 text-xs">
@@ -839,7 +842,7 @@ function OverviewRow({ label, value, bold, tone }: { label: string; value: strin
 
 
 /** One-by-one service breakdown for an agent (bookings' services + other-sale purchases), grouped like the supplier view. */
-function AgentServices({ bookings, otherRows }: { bookings: Booking[]; otherRows: LedgerEntry[] }) {
+function AgentServices({ bookings, otherRows }: { bookings: Booking[]; otherRows: OtherSaleRow[] }) {
   type Item = { key: string; title: string; sub: string; amount?: number; head: string };
   const groups: Record<string, Item[]> = { Hotel: [], Flight: [], Visa: [], Transport: [], Other: [] };
   bookings.forEach((b) => {
@@ -849,10 +852,11 @@ function AgentServices({ bookings, otherRows }: { bookings: Booking[]; otherRows
     (b.transports || []).forEach((t: any, i) => groups.Transport.push({ key: `${b.id}t${i}`, head: b.headId, title: t.route || t.vehicle || "Transport", sub: [t.vehicle, t.date].filter(Boolean).join(" · ") }));
     ((b as any).others || []).forEach((o: any, i: number) => groups.Other.push({ key: `${b.id}o${i}`, head: b.headId, title: o.name || o.description || "Service", sub: o.description || "" }));
   });
-  otherRows.forEach((e) => {
+  otherRows.forEach((r) => {
+    const e = r.entry;
     const cat = e.serviceCategory && groups[e.serviceCategory] ? e.serviceCategory : "Other";
     const d = e.purchaseDetails || {};
-    groups[cat].push({ key: e.id, head: e.forClientName || "Other Sale", title: d.hotelName || d.visaType || d.route || d.description || e.note || "Other Sale", sub: [e.date, d.city, `Other Sale`].filter(Boolean).join(" · "), amount: e.type === "purchase" ? (e.saleAmount ?? e.amount) : e.amount });
+    groups[cat].push({ key: `${e.id}-${r.line?.id || "x"}`, head: r.line?.forClientName || e.forClientName || "Other Sale", title: d.hotelName || d.visaType || d.route || d.description || e.note || "Other Sale", sub: [e.date, d.city, `Other Sale`].filter(Boolean).join(" · "), amount: r.sale });
   });
   const keys = Object.keys(groups).filter((k) => groups[k].length);
   if (!keys.length) return <p className="rounded-lg border border-border/50 p-3 text-center text-[11px] text-muted-foreground">No services recorded for this agent yet.</p>;

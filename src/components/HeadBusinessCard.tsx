@@ -18,6 +18,7 @@ function Row({ label, value, muted, sign }: { label: string; value: number; mute
 export default function HeadBusinessCard({ headId, open, onOpenChange }: { headId: string | null; open: boolean; onOpenChange: (o: boolean) => void }) {
   const store = useStore();
   const [expanded, setExpanded] = useState(false);
+  const [showAlloc, setShowAlloc] = useState(false);
   const hb = useMemo(
     () => (headId ? computeHeadBusiness(headId, store.clients, store.bookings, store.entries) : null),
     [headId, store.clients, store.bookings, store.entries],
@@ -55,6 +56,32 @@ export default function HeadBusinessCard({ headId, open, onOpenChange }: { headI
             <p>Outstanding: <span className="font-semibold text-warning">{formatCurrency(hb.outstanding)}</span></p>
           </div>
 
+          {hb.allocatedPurchases.length > 0 && (
+            <>
+              <button type="button" onClick={() => setShowAlloc(!showAlloc)} className="mt-5 flex items-center gap-1 text-xs font-medium text-primary hover:underline">
+                Allocated purchases ({hb.allocatedPurchases.length}) {showAlloc ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              </button>
+              {showAlloc && (
+                <div className="mt-3 overflow-hidden rounded-lg border border-border/60">
+                  <table className="w-full text-xs">
+                    <thead className="bg-accent/20 text-[10px] uppercase text-muted-foreground">
+                      <tr><th className="p-2 text-left">Date</th><th className="p-2 text-left">Supplier / Service</th><th className="p-2 text-right">This head's share</th></tr>
+                    </thead>
+                    <tbody>
+                      {hb.allocatedPurchases.map((r) => (
+                        <tr key={r.entryId} className="border-t border-border/40">
+                          <td className="p-2 text-muted-foreground">{r.date}</td>
+                          <td className="p-2"><div className="font-medium">{r.supplier}</div><div className="text-[10px] text-muted-foreground">{r.service} · {r.entryId}</div></td>
+                          <td className="p-2 text-right tabular-nums"><div className="font-semibold">{formatCurrency(r.share)}</div>{r.split && <div className="text-[10px] text-muted-foreground">of {formatCurrency(r.ofTotal)}</div>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+
           <button type="button" onClick={() => setExpanded(!expanded)} className="mt-5 flex items-center gap-1 text-xs font-medium text-primary hover:underline">
             View all linked entries {expanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
           </button>
@@ -71,7 +98,7 @@ export default function HeadBusinessCard({ headId, open, onOpenChange }: { headI
                       <td className="p-2 text-muted-foreground">{e.date}</td>
                       <td className="p-2 capitalize">{e.type.replace(/_/g, " ")}</td>
                       <td className="p-2 text-muted-foreground">{e.referenceName || "—"}</td>
-                      <td className="p-2 text-right font-semibold tabular-nums">{formatCurrency(e.amount)}</td>
+                      <td className="p-2 text-right font-semibold tabular-nums">{formatCurrency(e.type === "purchase" ? (hb.allocatedPurchases.find((r) => r.entryId === e.id)?.share ?? e.amount) : e.amount)}</td>
                     </tr>
                   ))}
                 </tbody>

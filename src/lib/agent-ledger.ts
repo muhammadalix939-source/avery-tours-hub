@@ -3,6 +3,7 @@
 //  1) Business account  : what his clients owe us  (Sale − Agent Commission = Net Receivable)
 //  2) Commission account: what we owe him          (Commission Earned − Commission Paid)
 import type { Agent, Booking, Client } from "./data";
+import { netCommissionOf } from "./data";
 import type { LedgerEntry } from "./store";
 
 /** Entry types that belong to an agent's client-business ledger (never supplier / office costs). */
@@ -48,7 +49,7 @@ export function computeAgentBusiness(
     .filter((e) => (e.type === "purchase" && e.purchasedFor === "agent" && e.agentId === agent.id) || (e.type === "other_sale" && e.referenceId === agent.id))
     .reduce((s, e) => s + (e.type === "purchase" ? (e.saleAmount ?? e.amount) : e.amount), 0);
   const grossSales = bookings.reduce((s, b) => s + (b.totalAmount || 0), 0) + (agent.openingSales || 0) + otherSale;
-  const commissionEarned = bookings.reduce((s, b) => s + (b.commission || 0), 0) + (agent.openingCommission || 0);
+  const commissionEarned = bookings.reduce((s, b) => s + netCommissionOf(b), 0) + (agent.openingCommission || 0);
   const commissionPaid =
     data.entries.filter((e) => e.type === "agent_commission" && e.referenceId === agent.id).reduce((s, e) => s + e.amount, 0) +
     (agent.openingPaidCommission || 0);

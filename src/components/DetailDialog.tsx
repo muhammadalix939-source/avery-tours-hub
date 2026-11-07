@@ -3,9 +3,10 @@ import { Button } from "@/components/ui/button";
 import { Download, ChevronRight, ArrowLeft, Users, DollarSign, FileText } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import ClientChecklistPanel from "@/components/ClientChecklistPanel";
-import { formatCurrency, getClientName } from "@/lib/data";
+import { formatCurrency, getClientName, netCommissionOf } from "@/lib/data";
 import type { Client, Booking, Agent, Supplier } from "@/lib/data";
 import type { LedgerEntry } from "@/lib/store";
+import { idName, getHeadName } from "@/lib/heads";
 import { generateClientStatement, generateSupplierLedger, generateAgentReport, generatePaymentHistory } from "@/lib/pdf";
 import { formatCurrency as fc } from "@/lib/data";
 import { useState } from "react";
@@ -43,26 +44,29 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
     if (!data) return;
     if (type === "client") {
       const c = data as Client;
-      generatePaymentHistory(`Client ${c.id}`,
-        [["Client ID", c.id], ["Name", getClientName(c)], ["Head ID", c.headId], ["Phone", c.phone]],
-        entries.filter((e) => e.type === "client_receive"),
-        [["Total Due", fc(c.amountDue), "ink"], ["Paid", fc(c.amountPaid), "success"], ["Remaining", fc(c.amountDue - c.amountPaid), "destructive"]]);
+      generatePaymentHistory(`Client ${idName(c.id, getClientName(c))}`,
+        [["Client", idName(c.id, getClientName(c))], ["Head", idName(c.headId, getHeadName(c.headId, allClients))], ["Phone", c.phone]],
+        entries.filter((e) => e.type === "client_receive" || e.type === "client_refund"),
+        [["Net Due", fc(c.amountDue), "ink"], ["Paid", fc(c.amountPaid), "success"], ["Remaining", fc(Math.max(0, c.amountDue - c.amountPaid)), "destructive"]],
+        { fileKey: `${c.id}_${getClientName(c).replace(/[^A-Za-z0-9]+/g, "_")}` });
     }
     if (type === "supplier") {
       const s = data as Supplier;
       const payable = s.totalPayable + (s.openingPayable || 0);
       const paid = s.totalPaid + (s.openingPaid || 0);
-      generatePaymentHistory(`Supplier ${s.id}`,
-        [["Supplier ID", s.id], ["Company", s.companyName], ["Contact", s.contactPerson]],
+      generatePaymentHistory(`Supplier ${idName(s.id, s.companyName)}`,
+        [["Supplier", idName(s.id, s.companyName)], ["Contact", s.contactPerson]],
         entries.filter((e) => e.type === "supplier_payment"),
-        [["Payable", fc(payable), "ink"], ["Paid", fc(paid), "success"], ["Remaining", fc(payable - paid), "destructive"]]);
+        [["Payable", fc(payable), "ink"], ["Paid", fc(paid), "success"], ["Remaining", fc(payable - paid), "destructive"]],
+        { fileKey: `${s.id}_${s.companyName.replace(/[^A-Za-z0-9]+/g, "_")}` });
     }
     if (type === "agent") {
       const a = data as Agent;
-      generatePaymentHistory(`Agent ${a.id}`,
-        [["Agent ID", a.id], ["Name", a.name], ["Phone", a.phone]],
+      generatePaymentHistory(`Agent ${idName(a.id, a.name)}`,
+        [["Agent", idName(a.id, a.name)], ["Phone", a.phone]],
         entries.filter((e) => e.type === "agent_commission" && e.referenceId === a.id),
-        [["Commission", fc(a.commission), "ink"], ["Paid", fc(a.paidCommission || 0), "success"], ["Payable", fc((a.commission || 0) - (a.paidCommission || 0)), "destructive"]]);
+        [["Commission", fc(a.commission), "ink"], ["Paid", fc(a.paidCommission || 0), "success"], ["Payable", fc((a.commission || 0) - (a.paidCommission || 0)), "destructive"]],
+        { fileKey: `${a.id}_${a.name.replace(/[^A-Za-z0-9]+/g, "_")}` });
     }
   }
 
@@ -74,7 +78,7 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
     const otherSaleTotal = otherSaleRows.reduce((s, e) => s + (e.type === "purchase" ? (e.saleAmount ?? e.amount) : e.amount), 0);
     const otherSaleCost = otherSaleRows.filter((e) => e.type === "purchase").reduce((s, e) => s + e.amount, 0);
     const totalSales = agentBookings.reduce((s, b) => s + b.totalAmount, 0) + (a.openingSales || 0) + otherSaleTotal;
-    const totalCommission = agentBookings.reduce((s, b) => s + (b.commission || 0), 0) + (a.openingCommission || 0);
+    const totalCommission = agentBookings.reduce((s, b) => s + netCommissionOf(b), 0) + (a.openingCommission || 0);
     const paidCommission = entries.filter((e) => e.type === "agent_commission" && e.referenceId === a.id).reduce((s, e) => s + e.amount, 0) + (a.openingPaidCommission || 0);
     const received = agentBookings.reduce((s, b) => s + (b.amountReceived || 0), 0)
       + entries.filter((e) => e.type === "agent_receive" && e.referenceId === a.id).reduce((s, e) => s + e.amount, 0);
@@ -267,7 +271,7 @@ export default function DetailDialog({ open, onOpenChange, type, data, entries =
                 <div className="rounded-lg border border-border/50 p-3 space-y-2">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Booking-wise Receivable</p>
                   {stats.agentBookings.map((b: any) => {
-                    const net = Math.max(0, (b.totalAmount || 0) - (b.commission || 0));
+                    const net = Math.max(0, (b.totalAmount || 0) - netCommissionOf(b));
                     return (
                       <div key={b.id} className="flex items-center justify-between rounded bg-accent/20 px-3 py-2">
                         <div>

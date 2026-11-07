@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useStore, computeAccountBalance, buildAccountLedger, type Account } from "@/lib/store";
+import { hasRealAgent } from "@/lib/heads";
 import { formatCurrency, computeBookingProfit, computeBookingFinancials, type Drawer, type Booking } from "@/lib/data";
 import { toast } from "sonner";
 
@@ -1083,7 +1084,7 @@ function AccountsPage() {
                         )}
                         {fin.discount > 0 && (
                           <div className="text-[9px] text-amber-400">
-                            Disc: {formatCurrency(fin.discount)} {b.discountSettlement === "agent_commission" ? "(Agent)" : "(Agency)"}
+                            Disc: {formatCurrency(fin.discount)} {hasRealAgent(b) && b.discountSettlement === "agent_commission" ? "(Agent)" : "(Agency)"}
                           </div>
                         )}
                         {fin.supplierDiscount > 0 && (

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatCurrency, getClientName } from "@/lib/data";
 import { useStore } from "@/lib/store";
-import { computeHeadBusiness } from "@/lib/heads";
+import { computeHeadBusiness, computeBookingMoney, idName } from "@/lib/heads";
 
 function Kpi({ label, value, tone = "text-foreground" }: { label: string; value: string; tone?: string }) {
   return (
@@ -35,18 +35,20 @@ export default function BookingViewDialog({ headId, onClose }: { headId: string 
   const agent = booking?.agentId ? store.agents.find((a) => a.id === booking.agentId) : null;
   const profit = hb.netProfit - gifts;
   const members = store.clients.filter((c) => c.headId === headId);
+  const money = booking ? computeBookingMoney(booking, store.entries) : null;
 
   return (
     <Dialog open={!!headId} onOpenChange={(o) => { if (!o) { onClose(); setTab("members"); } }}>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto border-border bg-card">
         <DialogHeader>
           <DialogTitle className="flex flex-wrap items-baseline gap-2">
-            <span className="text-primary">{headId}</span>
-            <span className="text-sm font-normal text-muted-foreground">{hb.leadName} · {booking?.packageType} · {booking?.travelDate} · {agent ? `Agent: ${agent.name}` : "Direct"}</span>
+            <span className="text-primary">{idName(headId, hb.leadName)}</span>
+            <span className="text-sm font-normal text-muted-foreground">{booking?.packageType} · {booking?.travelDate} · {agent ? `Agent: ${idName(agent.id, agent.name)}` : "Direct"}</span>
           </DialogTitle>
         </DialogHeader>
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className={`grid grid-cols-2 gap-2 ${hb.discount > 0 ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
+          {hb.discount > 0 && <Kpi label="Client Discount" value={`− ${formatCurrency(hb.discount)}`} tone="text-warning" />}
           <Kpi label="Net Receivable" value={formatCurrency(hb.netReceivable)} tone="text-primary" />
           <Kpi label="Received" value={formatCurrency(hb.received)} tone="text-success" />
           <Kpi label="Remaining" value={formatCurrency(hb.outstanding)} tone="text-destructive" />
@@ -64,23 +66,28 @@ export default function BookingViewDialog({ headId, onClose }: { headId: string 
         {tab === "members" && (
           <div className="grid gap-3 sm:grid-cols-2">
             {members.map((c) => {
-              const refunds = store.entries.filter((e) => e.type === "client_refund" && e.clientId === c.id).reduce((s, e) => s + e.amount, 0);
-              const charges = store.entries.filter((e) => e.type === "client_charge" && e.clientId === c.id).reduce((s, e) => s + e.amount, 0);
-              const ledger = store.entries.filter((e) => (e.clientId === c.id || e.referenceId === c.id) && ["client_receive", "client_charge", "client_refund"].includes(e.type)).sort((a, b) => a.date.localeCompare(b.date));
+              const refunds = store.entries.filter((e) => e.type === "client_refund" && e.headId === headId && (e.clientId && members.some((m) => m.id === e.clientId) ? e.clientId === c.id : members[0]?.id === c.id)).reduce((s, e) => s + e.amount, 0);
+              const isLead = members[0]?.id === c.id;
+              const mineOrLead = (e: { clientId?: string }) => (e.clientId && members.some((m) => m.id === e.clientId) ? e.clientId === c.id : isLead);
+              const charges = store.entries.filter((e) => e.type === "client_charge" && e.headId === headId && mineOrLead(e)).reduce((s, e) => s + e.amount, 0);
+              // Discount actually applied to this member = package + charges − refunds − what they owe now.
+              const discount = Math.max(0, (c.baseDue ?? c.amountDue) + charges - refunds - c.amountDue);
+              const ledger = store.entries.filter((e) => (e.clientId === c.id || e.referenceId === c.id) && ["client_receive", "client_charge", "client_refund", "client_discount"].includes(e.type)).sort((a, b) => a.date.localeCompare(b.date));
               const remaining = Math.max(0, c.amountDue - c.amountPaid);
               return (
                 <div key={c.id} className="rounded-xl border border-border/60 bg-accent/5 p-4">
                   <div className="mb-2 flex items-start justify-between">
                     <div>
-                      <p className="text-sm font-semibold">{getClientName(c)}</p>
-                      <p className="text-[10px] text-muted-foreground">{c.id} · {c.ageCategory || "Adult"} · {c.gender} · {c.passport || "No passport"}</p>
+                      <p className="text-sm font-semibold">{idName(c.id, getClientName(c))}</p>
+                      <p className="text-[10px] text-muted-foreground">{c.ageCategory || "Adult"} · {c.gender} · {c.passport || "No passport"}</p>
                     </div>
                     <span className={`rounded-full border px-2 py-0.5 text-[10px] ${c.paymentStatus === "Paid" ? "border-success/40 text-success" : c.paymentStatus === "Partial" ? "border-warning/40 text-warning" : "border-destructive/40 text-destructive"}`}>{c.paymentStatus}</span>
                   </div>
                   <Line label="Package (per person)" value={c.baseDue ?? c.amountDue} />
                   {charges > 0 && <Line label="Extra charges" value={charges} sign="+ " />}
                   {refunds > 0 && <Line label="Refunds" value={refunds} sign="− " tone="text-destructive" />}
-                  <Line label="Total Amount" value={c.amountDue} strong />
+                  {discount > 0 && <Line label="Discount" value={discount} sign="− " tone="text-warning" />}
+                  <Line label="Net Payable" value={c.amountDue} strong />
                   <Line label="Received" value={c.amountPaid} tone="text-success" />
                   <Line label="Remaining" value={remaining} tone={remaining > 0 ? "text-destructive" : "text-success"} />
                   {ledger.length > 0 && (
@@ -88,8 +95,8 @@ export default function BookingViewDialog({ headId, onClose }: { headId: string 
                       <p className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Ledger</p>
                       {ledger.map((e) => (
                         <div key={e.id} className="flex justify-between text-[10px]">
-                          <span className="text-muted-foreground">{e.date} · {e.type === "client_receive" ? "Received" : e.type === "client_refund" ? "Refund" : e.chargeCategory || "Charge"}</span>
-                          <span className={e.type === "client_receive" ? "text-success" : e.type === "client_refund" ? "text-destructive" : ""}>{formatCurrency(e.amount)}</span>
+                          <span className="text-muted-foreground">{e.date} · {e.type === "client_receive" ? "Received" : e.type === "client_refund" ? "Refund" : e.type === "client_discount" ? "Discount" : e.chargeCategory || "Charge"}</span>
+                          <span className={e.type === "client_receive" ? "text-success" : e.type === "client_refund" || e.type === "client_discount" ? "text-destructive" : ""}>{formatCurrency(e.amount)}</span>
                         </div>
                       ))}
                     </div>
@@ -105,12 +112,14 @@ export default function BookingViewDialog({ headId, onClose }: { headId: string 
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
               <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-primary">Profit & Loss</p>
-              <Line label={`Sale (${hb.members} × ${formatCurrency(hb.perPerson)})`} value={hb.totalSale - hb.otherCosts} />
+              <Line label={`Package (${hb.members} pax)`} value={hb.totalSale - hb.otherCosts} />
               {hb.otherCosts > 0 && <Line label="Extra charges" value={hb.otherCosts} sign="+ " />}
               {hb.refunds > 0 && <Line label="Client refunds" value={hb.refunds} sign="− " />}
+              {hb.discount > 0 && <Line label="Client discount" value={hb.discount} sign="− " tone="text-warning" />}
               <Line label="Net Sale" value={hb.netReceivable} strong />
               <Line label="Supplier purchases" value={hb.totalPurchase} sign="− " tone="text-warning" />
-              <Line label={`Agent commission${agent ? ` (${agent.name})` : ""}`} value={hb.commission} sign="− " tone="text-warning" />
+              <Line label={`Agent commission${agent ? ` (${idName(agent.id, agent.name)})` : ""}`} value={hb.commission} sign="− " tone="text-warning" />
+              {hb.agentAbsorbedDiscount > 0 && <p className="pb-1 text-[10px] text-muted-foreground">Commission {formatCurrency(hb.grossCommission)} less {formatCurrency(hb.agentAbsorbedDiscount)} discount settled by the agent.</p>}
               {gifts > 0 && <Line label="Gifts & expenses" value={gifts} sign="− " tone="text-warning" />}
               <Line label="Net Profit" value={profit} strong tone={profit >= 0 ? "text-success" : "text-destructive"} />
               <div className="mt-3 border-t border-border/40 pt-2">

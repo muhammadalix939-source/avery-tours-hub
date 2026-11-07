@@ -8,6 +8,46 @@ export function getHeadName(headId: string, clients: Client[]): string {
   return lead ? getClientName(lead) : "—";
 }
 
+/** A booking has a real agent only when agentId is set and not the literal "Direct". */
+export function hasRealAgent(b?: Pick<Booking, "agentId"> | null): boolean {
+  return !!b && !!b.agentId && b.agentId !== "Direct";
+}
+
+/** "ID — Name" pair used on every statement / table so an ID is never shown without who it belongs to. */
+export function idName(id: string | undefined | null, name: string | undefined | null): string {
+  const i = (id || "").trim();
+  const n = (name || "").trim();
+  if (i && n && n !== "—" && n !== i) return `${i} — ${n}`;
+  return i || n || "—";
+}
+
+export interface BookingMoney {
+  /** Package + extra charges, before any concession. */
+  gross: number;
+  charges: number;
+  refunds: number;
+  /** Booking-form discount + every client_discount ledger entry. */
+  discount: number;
+  /** gross − refunds − discount: what the client actually owes. */
+  net: number;
+  received: number;
+  pending: number;
+}
+
+/** Client-facing money for a booking. Always net of discount — use this (not booking.totalAmount) in views & statements. */
+export function computeBookingMoney(b: Booking, entries: LedgerEntry[]): BookingMoney {
+  const mine = entries.filter((e) => e.headId === b.headId);
+  const sum = (t: LedgerEntry["type"]) => mine.filter((e) => e.type === t).reduce((s, e) => s + e.amount, 0);
+  const base = b.baseAmount ?? b.totalAmount;
+  const charges = sum("client_charge");
+  const refunds = sum("client_refund");
+  const discount = Math.max(0, Number(b.discount) || 0) + sum("client_discount");
+  const gross = base + charges;
+  const net = Math.max(0, gross - refunds - discount);
+  const received = b.amountReceived || 0;
+  return { gross, charges, refunds, discount, net, received, pending: Math.max(0, net - received) };
+}
+
 export interface HeadBusinessMember {
   id: string;
   name: string;
@@ -26,6 +66,12 @@ export interface HeadBusiness {
   otherCosts: number;
   totalSale: number;
   refunds: number;
+  /** Client discount / concession (booking-form + ledger). */
+  discount: number;
+  /** Share of the discount carried by the agent's commission (agent-settled) */
+  agentAbsorbedDiscount: number;
+  /** Gross commission before any discount offset. */
+  grossCommission: number;
   netReceivable: number;
   totalPurchase: number;
   commission: number;
@@ -52,13 +98,20 @@ export function computeHeadBusiness(
   const otherCosts = linked.filter((e) => e.type === "client_charge").reduce((s, e) => s + e.amount, 0);
   const base = booking?.baseAmount ?? booking?.totalAmount ?? members.reduce((s, c) => s + (c.baseDue ?? c.amountDue), 0);
   const perPerson = members.length ? Math.round(base / members.length) : base;
-  const totalSale = perPerson * (members.length || 1) + otherCosts;
+  // Exact package total (not perPerson × members, which drifts by rounding when the total does not divide evenly).
+  const totalSale = base + otherCosts;
   const refunds = linked.filter((e) => e.type === "client_refund").reduce((s, e) => s + e.amount, 0);
-  const netReceivable = totalSale - refunds;
+  const bookingDiscount = Math.max(0, Number(booking?.discount) || 0);
+  const discount = bookingDiscount + linked.filter((e) => e.type === "client_discount").reduce((s, e) => s + e.amount, 0);
+  const netReceivable = Math.max(0, totalSale - refunds - discount);
   const purchaseEntries = linked.filter((e) => e.type === "purchase");
   const supplierRefunds = linked.filter((e) => e.type === "supplier_refund").reduce((s, e) => s + e.amount, 0);
   const totalPurchase = Math.max(purchaseEntries.reduce((s, e) => s + e.amount, 0), booking?.totalCost || 0) - supplierRefunds;
-  const commission = booking?.commission || 0;
+  const grossCommission = booking?.commission || 0;
+  // A discount settled from the agent's commission is absorbed by the agent (up to the commission); it is
+  // already deducted from revenue above, so profit must NOT also gain it back through a smaller commission twice.
+  const agentAbsorbedDiscount = hasRealAgent(booking) && booking?.discountSettlement === "agent_commission" ? Math.min(grossCommission, bookingDiscount) : 0;
+  const commission = Math.max(0, grossCommission - agentAbsorbedDiscount);
   const received = linked.filter((e) => e.type === "client_receive").reduce((s, e) => s + e.amount, 0);
 
   // ---- Supplier Paid / Remaining for THIS head's purchases only ----
@@ -100,6 +153,9 @@ export function computeHeadBusiness(
     otherCosts,
     totalSale,
     refunds,
+    discount,
+    agentAbsorbedDiscount,
+    grossCommission,
     netReceivable,
     totalPurchase,
     commission,

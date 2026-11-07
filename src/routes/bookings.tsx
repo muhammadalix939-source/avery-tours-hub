@@ -15,8 +15,8 @@ import SortBar from "@/components/SortBar";
 import { sortEntities, type SortOptionKey } from "@/lib/sort-utils";
 import { formatCurrency, getClientName, PACKAGE_TYPES, computeBookingProfit, computeBookingFinancials, type Booking, type Client } from "@/lib/data";
 import { useStore } from "@/lib/store";
-import { getHeadName } from "@/lib/heads";
-import { computeGroupUsedPax } from "@/lib/store";
+import { computeBookingMoney, hasRealAgent, idName, getHeadName } from "@/lib/heads";
+import { computeGroupUsedPax, getHeadClients } from "@/lib/store";
 import { getPKTDate } from "@/lib/date-utils";
 import { generateInvoice, generatePaymentHistory } from "@/lib/pdf";
 import { useState, useMemo } from "react";
@@ -254,7 +254,7 @@ function BookingsPage() {
         isVip: false,
         destination: form.destination,
         driveLink: form.driveLink,
-      });
+      }, { skipBookingSync: true });
       clientIds.push(cid);
     });
 
@@ -319,7 +319,7 @@ function BookingsPage() {
     (["Adult", "Child", "Infant"] as const).forEach((cat) => {
       const existing = store.clients.filter((c) => c.headId === headId && (c.ageCategory || "Adult") === cat);
       if (existing.length > wanted[cat]) {
-        existing.slice(wanted[cat]).forEach((c) => store.deleteClient(c.id));
+        existing.slice(wanted[cat]).forEach((c) => store.deleteClient(c.id, { skipBookingSync: true }));
       } else if (existing.length < wanted[cat]) {
         const lead = store.clients.find((c) => c.headId === headId);
         for (let i = existing.length; i < wanted[cat]; i++) {
@@ -329,12 +329,13 @@ function BookingsPage() {
             phone: lead?.phone || "", email: lead?.email || "",
             packageType: form.packageType, paymentStatus: "Unpaid", amountDue: 0, amountPaid: 0,
             isVip: false, destination: form.destination, driveLink: form.driveLink,
-          });
+          }, { skipBookingSync: true });
         }
       }
     });
 
-    const cs = store.clients.filter((c) => c.headId === headId);
+    // `store.clients` in this closure is a stale render snapshot — read the live roster after add/delete.
+    const cs = getHeadClients(headId);
     const adults = cs.filter((c) => (c.ageCategory || "Adult") === "Adult");
     const children = cs.filter((c) => c.ageCategory === "Child");
     const infants = cs.filter((c) => c.ageCategory === "Infant");
@@ -380,20 +381,11 @@ function BookingsPage() {
       members: cs.length,
       clientIds: cs.map((c) => c.id),
     });
-    // Override per-category dues and redistribute the payment
-    let remaining = Number(form.amountReceived) || 0;
-    const ordered = [...adults, ...children, ...infants];
-    ordered.forEach((c) => {
+    // Per-category package prices. Payments / discounts / charges are re-derived by the store from the ledger,
+    // so nothing is hand-allocated here any more.
+    [...adults, ...children, ...infants].forEach((c) => {
       const due = c.ageCategory === "Child" ? childPrice : c.ageCategory === "Infant" ? infantPrice : adultPrice;
-      let paid = 0;
-      let status: "Paid" | "Partial" | "Unpaid" = "Unpaid";
-      if (due <= 0) { paid = 0; status = "Paid"; }
-      else if (remaining >= due) { paid = due; remaining -= due; status = "Paid"; }
-      else if (remaining > 0) { paid = remaining; remaining = 0; status = "Partial"; }
-      store.updateClient(c.id, {
-        amountDue: due, amountPaid: paid, paymentStatus: status,
-        packageType: form.packageType, destination: form.destination,
-      });
+      store.updateClient(c.id, { amountDue: due, packageType: form.packageType, destination: form.destination }, { skipBookingSync: true });
     });
     setEditOpen(false);
   }
@@ -416,7 +408,14 @@ function BookingsPage() {
       adults: String(adults.length || b.members || 1),
       children: String(children.length),
       infants: String(infants.length),
-      pricingMode: "total",
+      // Per-person pricing when the stored members add up exactly to the package total — then adding a pax
+      // in the edit form ADDS that person's price. Otherwise keep the entered total (no silent re-pricing).
+      pricingMode: ((): "per_person" | "total" => {
+        const price = (c?: Client) => c?.baseDue ?? c?.amountDue ?? 0;
+        const same = adults.every((a) => price(a) === price(adults[0]));
+        const sum = adults.length * price(adults[0]) + children.length * price(children[0]) + infants.length * price(infants[0]);
+        return same && sum === (b.baseAmount ?? b.totalAmount) ? "per_person" : "total";
+      })(),
       adultPrice: String(adults[0]?.baseDue ?? adults[0]?.amountDue ?? 0),
       childPrice: String(children[0]?.baseDue ?? children[0]?.amountDue ?? 0),
       infantPrice: String(infants[0]?.baseDue ?? infants[0]?.amountDue ?? 0),
@@ -431,21 +430,39 @@ function BookingsPage() {
     const clients = store.clients.filter((c) => c.headId === b.headId);
     const agent = store.agents.find((a) => a.id === b.agentId);
     const supplier = store.suppliers.find((s) => s.id === b.supplierId);
-    generateInvoice(b, clients, agent, supplier);
+    generateInvoice(b, clients, agent, supplier, store.entries);
   }
 
   function downloadPaymentHistory(b: Booking) {
-    const related = store.entries.filter((e) => e.headId === b.headId && e.type === "client_receive");
-    const totalReceived = related.reduce((s, e) => s + e.amount, 0);
+    const related = store.entries.filter(
+      (e) => e.headId === b.headId && ["client_receive", "client_refund", "client_charge", "client_discount"].includes(e.type),
+    );
+    const money = computeBookingMoney(b, store.entries);
+    const headName = getHeadName(b.headId, store.clients);
+    const agent = hasRealAgent(b) ? store.agents.find((a) => a.id === b.agentId) : undefined;
     generatePaymentHistory(
-      `Booking ${b.headId}`,
-      [["Head ID", b.headId], ["Package", b.packageType], ["Travel Date", b.travelDate], ["Members", String(b.members)]],
+      `Booking ${idName(b.headId, headName)}`,
+      [
+        ["Head", idName(b.headId, headName)],
+        ["Package", `${b.packageType} · ${b.travelDate}`],
+        ["Members", String(store.clients.filter((c) => c.headId === b.headId).length || b.members)],
+        ["Agent", agent ? idName(agent.id, agent.name) : "Direct"],
+      ],
       related,
       [
-        ["Total Amount", formatCurrency(b.totalAmount), "ink"],
-        ["Received", formatCurrency(totalReceived), "success"],
-        ["Pending", formatCurrency(b.totalAmount - totalReceived), "destructive"],
-      ]
+        ["Gross Amount", formatCurrency(money.gross), "ink"],
+        ["Client Discount", money.discount > 0 ? `− ${formatCurrency(money.discount)}` : formatCurrency(0), "gold"],
+        ["Net Payable", formatCurrency(money.net), "ink"],
+        ["Received", formatCurrency(money.received), "success"],
+        ["Pending", formatCurrency(money.pending), "destructive"],
+      ],
+      {
+        fileKey: `${b.headId}_${headName.replace(/[^A-Za-z0-9]+/g, "_")}`,
+        extraAdjustments: b.discount ? [{
+          date: b.createdAt || getPKTDate(), ref: b.headId, kind: "discount" as const, amount: b.discount,
+          note: `Discount on booking${hasRealAgent(b) && b.discountSettlement === "agent_commission" ? " (settled from agent commission)" : " (absorbed by agency)"}`,
+        }] : [],
+      },
     );
   }
 
@@ -1006,7 +1023,9 @@ function BookingsPage() {
             </thead>
             <tbody>
               {filteredAndSortedBookings.map((b) => {
-                const pending = b.totalAmount - b.amountReceived;
+                const money = computeBookingMoney(b, store.entries);
+                const pending = money.pending;
+                const agentRow = hasRealAgent(b) ? store.agents.find((a) => a.id === b.agentId) : undefined;
                 const clients = store.clients.filter((c) => c.headId === b.headId);
                 const profit = computeBookingProfit(b);
                 const isEarned = b.profitStatus === "earned";
@@ -1021,8 +1040,22 @@ function BookingsPage() {
                     </td>
                     <td className="px-3 py-3">{b.packageType}</td>
                     <td className="px-3 py-3">{clients.length}</td>
-                    <td className="whitespace-nowrap px-3 py-3 text-muted-foreground">{b.agentId || "Direct"}</td>
-                    <td className="whitespace-nowrap px-3 py-3 font-mono">{formatCurrency(b.totalAmount)}</td>
+                    <td className="px-3 py-3 text-muted-foreground">
+                      {hasRealAgent(b) ? (
+                        <>
+                          <div className="whitespace-nowrap font-medium text-foreground/80">{b.agentId}</div>
+                          {agentRow && <div className="max-w-[140px] truncate text-xs" title={agentRow.name}>{agentRow.name}</div>}
+                        </>
+                      ) : "Direct"}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 font-mono">
+                      <div title="Net payable after discount">{formatCurrency(money.net)}</div>
+                      {money.discount > 0 && (
+                        <div className="text-[10px] font-normal text-muted-foreground">
+                          {formatCurrency(money.gross)} − {formatCurrency(money.discount)} disc
+                        </div>
+                      )}
+                    </td>
                     <td className="whitespace-nowrap px-3 py-3 text-success font-mono">{formatCurrency(b.amountReceived)}</td>
                     <td className="whitespace-nowrap px-3 py-3 text-destructive font-mono">{formatCurrency(pending)}</td>
                     <td className="px-3 py-3">
@@ -1054,7 +1087,7 @@ function BookingsPage() {
                             {/* Concession & Supplier Rebate Tags */}
                             {fin.discount > 0 && (
                               <span className="text-[10px] text-amber-400/90 font-mono">
-                                Disc: {formatCurrency(fin.discount)} {b.discountSettlement === "agent_commission" ? "(Agent)" : "(Agency)"}
+                                Disc: {formatCurrency(fin.discount)} {hasRealAgent(b) && b.discountSettlement === "agent_commission" ? "(Agent)" : "(Agency)"}
                               </span>
                             )}
                             {fin.supplierDiscount > 0 && (
@@ -1171,7 +1204,7 @@ function BookingsPage() {
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-semibold"><span className="text-primary">{b.headId}</span> — {getHeadName(b.headId, store.clients)} <span className="font-normal text-muted-foreground">· Clients ({clients.length})</span></h3>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">Supplier: {b.supplierId} | Destination: {b.destination || "—"}</span>
+                <span className="text-xs text-muted-foreground">Supplier: {idName(b.supplierId, store.suppliers.find((x) => x.id === b.supplierId)?.companyName)} | Destination: {b.destination || "—"}</span>
                 <Button
                   size="sm"
                   variant="outline"
@@ -1212,7 +1245,7 @@ function BookingsPage() {
                 <button
                   key={c.id}
                   type="button"
-                  onClick={() => { setMemberEdit({ ...c }); setMemberEditOpen(true); }}
+                  onClick={() => { setMemberEdit({ ...c, amountDue: c.baseDue ?? c.amountDue }); setMemberEditOpen(true); }}
                   className="flex items-center justify-between rounded-lg border border-border/50 bg-accent/10 px-4 py-3 text-left transition-colors hover:bg-accent/30 hover:border-primary/50"
                 >
                   <div className="min-w-0">
@@ -1291,9 +1324,13 @@ function BookingsPage() {
                 <div><Label className="text-[10px]">Email</Label><Input value={memberEdit.email || ""} onChange={(e) => setMemberEdit({ ...memberEdit, email: e.target.value })} className="bg-accent/20 border-border mt-0.5 h-8 text-xs" /></div>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <div><Label className="text-[10px]">Amount Due</Label><Input type="number" value={memberEdit.amountDue} onChange={(e) => setMemberEdit({ ...memberEdit, amountDue: Number(e.target.value) || 0 })} className="bg-accent/20 border-border mt-0.5 h-8 text-xs" /></div>
-                <div><Label className="text-[10px]">Amount Paid</Label><Input type="number" value={memberEdit.amountPaid} onChange={(e) => setMemberEdit({ ...memberEdit, amountPaid: Number(e.target.value) || 0 })} className="bg-accent/20 border-border mt-0.5 h-8 text-xs" /></div>
+                <div><Label className="text-[10px]">Package Price (PKR)</Label><Input type="number" value={memberEdit.amountDue} onChange={(e) => setMemberEdit({ ...memberEdit, amountDue: Number(e.target.value) || 0 })} className="bg-accent/20 border-border mt-0.5 h-8 text-xs" /></div>
+                <div><Label className="text-[10px]">Amount Paid (from ledger)</Label><Input type="number" value={memberEdit.id ? memberEdit.amountPaid : 0} readOnly disabled className="bg-accent/10 border-border mt-0.5 h-8 text-xs" /></div>
               </div>
+              <p className="text-[10px] text-muted-foreground">
+                {memberEdit.id ? "Changing the package price updates this booking's total automatically. " : "This person's package price will be added to the booking total. "}
+                Payments are recorded in Entries (Client Receive), and discounts / charges / refunds there are applied automatically.
+              </p>
               <div className="flex items-center gap-2">
                 <input id="vip" type="checkbox" checked={memberEdit.isVip} onChange={(e) => setMemberEdit({ ...memberEdit, isVip: e.target.checked })} />
                 <Label htmlFor="vip" className="text-xs">Mark as VIP</Label>
@@ -1306,17 +1343,10 @@ function BookingsPage() {
             const due = memberEdit.amountDue;
             const status: "Paid" | "Partial" | "Unpaid" = paid >= due && due > 0 ? "Paid" : paid > 0 ? "Partial" : "Unpaid";
             if (!memberEdit.id) {
-              // New member — create client and attach to booking
+              // New member: the store adds this person's package price to the booking total and re-derives dues.
               const { id: _omit, ...rest } = memberEdit;
               void _omit;
-              const newId = store.addClient({ ...rest, paymentStatus: status });
-              const booking = store.bookings.find((bk) => bk.headId === memberEdit.headId);
-              if (booking) {
-                store.updateBooking(booking.id, {
-                  clientIds: [...booking.clientIds, newId],
-                  members: (booking.members || booking.clientIds.length) + 1,
-                });
-              }
+              store.addClient({ ...rest, paymentStatus: "Unpaid", amountPaid: 0 });
             } else {
               store.updateClient(memberEdit.id, { ...memberEdit, paymentStatus: status });
             }

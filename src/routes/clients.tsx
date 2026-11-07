@@ -80,7 +80,7 @@ function ClientsPage() {
       gender: c.gender, nationality: c.nationality || "", passport: c.passport,
       cnic: c.cnic || "", dateOfBirth: c.dateOfBirth || "", dateOfIssue: c.dateOfIssue || "",
       dateOfExpire: c.dateOfExpire || "", phone: c.phone, email: c.email || "",
-      packageType: c.packageType, amountDue: String(c.amountDue),
+      packageType: c.packageType, amountDue: String(c.baseDue ?? c.amountDue),
       isVip: c.isVip, destination: c.destination || "", driveLink: c.driveLink || "",
     });
     setEditOpen(true);
@@ -131,7 +131,7 @@ function ClientsPage() {
             </SelectContent>
           </Select>
         </div>
-        <div><Label className="text-xs">Amount Due (PKR)</Label><Input type="number" value={form.amountDue} onChange={(e) => setForm({ ...form, amountDue: e.target.value })} className="bg-accent/20 border-border mt-1 h-8 text-xs" /></div>
+        <div><Label className="text-xs">Package Price (PKR)</Label><Input type="number" value={form.amountDue} onChange={(e) => setForm({ ...form, amountDue: e.target.value })} className="bg-accent/20 border-border mt-1 h-8 text-xs" /></div>
       </div>
       <div><Label className="text-xs">Destination</Label><Input value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} placeholder="Makkah / Madinah" className="bg-accent/20 border-border mt-1 h-8 text-xs" /></div>
       <div><Label className="text-xs">Drive Link (optional)</Label><Input value={form.driveLink} onChange={(e) => setForm({ ...form, driveLink: e.target.value })} className="bg-accent/20 border-border mt-1 h-8 text-xs" /></div>

@@ -1,6 +1,7 @@
 // Pure analytics helpers for Purchase Groups (PNR / batch groups).
 // Keeps the Groups page logic testable and consistent with the rest of the CRM.
 import type { Booking, Client, Supplier } from "./data";
+import { netCommissionOf } from "./data";
 import type { LedgerEntry, PurchaseGroup } from "./store";
 
 export interface GroupHeadSummary {
@@ -89,7 +90,7 @@ export function computeGroupStats(
     .reduce((s, e) => s + e.amount, 0);
   const supplierBill = Math.max(0, purchases.reduce((s, e) => s + e.amount, 0) - supplierRefunds.reduce((s, e) => s + e.amount, 0));
   const supplierPaid = payments.reduce((s, e) => s + e.amount, 0);
-  const commission = linkedBookings.reduce((s, b) => s + (b.commission || 0), 0);
+  const commission = linkedBookings.reduce((s, b) => s + netCommissionOf(b), 0);
   const expenses = groupExpenses.reduce((s, e) => s + e.amount, 0);
   const netProfit = revenue - supplierBill - commission - expenses;
 

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { formatCurrency } from "@/lib/data";
 import { useStore } from "@/lib/store";
-import { computeHeadBusiness } from "@/lib/heads";
+import { computeHeadBusiness, idName } from "@/lib/heads";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
 function Row({ label, value, muted, sign }: { label: string; value: number; muted?: boolean; sign?: string }) {
@@ -28,8 +28,8 @@ export default function HeadBusinessCard({ headId, open, onOpenChange }: { headI
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg overflow-hidden border-border bg-card p-0">
         <div className="bg-sidebar px-6 py-5">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary/70">{hb.headId}</p>
-          <h2 className="mt-1 text-lg font-bold text-foreground">{hb.leadName}</h2>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary/70">Head Business View</p>
+          <h2 className="mt-1 text-lg font-bold text-foreground">{idName(hb.headId, hb.leadName)}</h2>
           <div className="mt-2 h-[2px] w-16 rounded-full bg-primary" />
         </div>
 
@@ -40,10 +40,11 @@ export default function HeadBusinessCard({ headId, open, onOpenChange }: { headI
           <div className="my-2 border-t border-border/60" />
           <Row label="Total Sale Amount" value={hb.totalSale} />
           <Row label="(–) Refunds" value={hb.refunds} sign="–" />
+          {hb.discount > 0 && <Row label="(–) Client Discount" value={hb.discount} sign="–" />}
           <Row label="= Net Receivable" value={hb.netReceivable} />
           <div className="my-2 border-t border-border/60" />
           <Row label="Total Purchase (Cost)" value={hb.totalPurchase} />
-          <Row label="Commission" value={hb.commission} />
+          <Row label={hb.agentAbsorbedDiscount > 0 ? "Commission (net of agent-settled discount)" : "Commission"} value={hb.commission} />
           <div className="my-2 border-t border-border/60" />
           <div className="flex items-baseline justify-between rounded-lg bg-primary/5 px-3 py-3">
             <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Net Profit</span>

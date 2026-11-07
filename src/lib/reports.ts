@@ -1,4 +1,5 @@
 import type { Booking, Agent, Supplier, Client } from "./data";
+import { netCommissionOf } from "./data";
 import type { LedgerEntry, OpeningBalances } from "./store";
 
 export interface ReportInput {
@@ -71,7 +72,7 @@ export function computeTotals(input: ReportInput): FinancialTotals {
   // Cost of sales = live purchases (net of supplier refunds) or booking cost fallback + opening cost
   const totalCost = Math.max(0, livePurchases + bookingCostFallback - supplierRefunds) + openingCost;
   const expenses = liveExpenses + openingExpenses;
-  const commissionEarned = bookings.reduce((s, b) => s + (b.commission || 0), 0) + openingCommission;
+  const commissionEarned = bookings.reduce((s, b) => s + netCommissionOf(b), 0) + openingCommission;
   const pending = Math.max(0, (bookedSales - bookings.reduce((s, b) => s + (b.amountReceived || 0), 0)) + (opening.pending || 0));
   const supplierPayable = suppliers.reduce((s, sp) => s + Math.max(0, (sp.totalPayable + (sp.openingPayable || 0)) - (sp.totalPaid + (sp.openingPaid || 0))), 0) + (opening.supplierDue || 0);
   // Gross profit = Revenue − Cost of sales   (both include their opening parts)
@@ -114,7 +115,7 @@ export function profitByPackage(input: ReportInput): PackageRow[] {
     const purchases = entries.filter(e => e.type === "purchase" && e.headId === b.headId).reduce((s, e) => s + e.amount, 0);
     const cost = purchases > 0 ? purchases : (b.totalCost || 0);
     const revenue = b.totalAmount || 0;
-    const profit = revenue - cost - (b.commission || 0);
+    const profit = revenue - cost - netCommissionOf(b);
     const cur = map.get(key) || { packageType: key, bookings: 0, revenue: 0, cost: 0, profit: 0, margin: 0, avgProfit: 0 };
     cur.bookings += 1;
     cur.revenue += revenue;
@@ -179,7 +180,7 @@ export function topProfitableBookings(input: ReportInput, n = 5) {
   return bookings.map(b => {
     const purchases = entries.filter(e => e.type === "purchase" && e.headId === b.headId).reduce((s, e) => s + e.amount, 0);
     const cost = purchases > 0 ? purchases : (b.totalCost || 0);
-    const profit = (b.totalAmount || 0) - cost - (b.commission || 0);
+    const profit = (b.totalAmount || 0) - cost - netCommissionOf(b);
     return { ...b, _cost: cost, _profit: profit };
   }).sort((a, b) => b._profit - a._profit).slice(0, n);
 }
